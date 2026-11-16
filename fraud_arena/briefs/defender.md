@@ -41,5 +41,10 @@ that hit legitimate activity). Fraudsters see what happens to their attempts and
 Status
 {deploy_state}
 
-Your institution's own outcomes since the last boundary (its own decisions and records):
+Your institution's own outcomes since the last boundary: its decisions by action, and `fraud_signals`, what it
+newly learned about fraud in its own records (new disputes, chargebacks, returns, claims, complaints, alerts, reviews
+since your last turn). Fraudsters adapt to what you deploy, so a stack that worked last week may not work this week.
+Each turn, check these signals against what your stack is catching, look into what's new (query the tables behind
+them), and change your stack where it pays off. You have up to two hours of work per turn; use what the situation
+needs.
 {outcomes}

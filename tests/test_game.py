@@ -24,7 +24,8 @@ class Engine:
     def world(self, cfg): return None
     def decisions_of(self, cfg): return {"brind_card_auth"}
     def role_of(self, cfg): return {"brind_card_auth": "brind_defender"}
-    def write_tables(self, run, cfg, tag=None): pass
+    def write_tables(self, run, cfg, tag=None): return None
+    def fraud_signals(self, data, prev, cfg, b): return {}
     @contextmanager
     def tool_server(self, run, cfg, workspace=None, tag=None): yield McpServer("arena", url="http://x/mcp")
     def own_outcomes(self, run, cfg, a, b): return {}

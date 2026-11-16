@@ -92,6 +92,7 @@ class Game:
         self.good: dict[str, dict] = {}  # role -> last deployment that ran through a period
         self.role_of_decision: dict[str, str] = {}
         self.owner_of_role: dict[str, str] = {}
+        self.last_tables: dict[str, Path] = {}
         self.out, self.sandbox = Path(out), Path(sandbox)
         self.attacker = attacker_api
         self.log = log
@@ -188,7 +189,13 @@ class Game:
         if p.side == "defender":
             ecfg = cfg.for_institution(p.target)
             st = self.state[p.name]
-            outcomes = self.engine.own_outcomes(game, ecfg, max(cfg.start_day, b - cfg.period_days), b)
+            data = self.engine.write_tables(game, ecfg, tag=p.name)
+            since = max(cfg.start_day, b - cfg.period_days)
+            outcomes = self.engine.own_outcomes(game, ecfg, since, b)
+            outcomes["fraud_signals"] = self.engine.fraud_signals(data, self.last_tables.get(p.name), ecfg, b)
+            outcomes["fraud_signals_note"] = ("rows new since your last turn" if p.name in self.last_tables
+                                              else "rows of the last 30 days")
+            self.last_tables[p.name] = data
             prompt = brief_text(ecfg, b, outcomes, st, first=first)
             (ws / ".arena" / "grayson").mkdir(parents=True, exist_ok=True)
             (ws / ".arena" / "grayson" / "calls.json").write_text(json.dumps({"used": 0}))

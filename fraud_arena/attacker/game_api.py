@@ -1,6 +1,8 @@
 """The attacker side as `Game` uses it: one object per game, over the menu, view and operator modules."""
 from __future__ import annotations
 
+import json
+
 from datetime import datetime
 from pathlib import Path
 
@@ -58,15 +60,33 @@ class Attackers:
               boundary: int, boundaries: int) -> str:
         text = operator.brief(ring=ring, schema=self.schema(ring), day=day, period_days=period_days,
                               boundary=boundary, boundaries=boundaries)
+        text += (f"\n\nThe ring's capacity is limited: a scheme runs at most {self.MAX_SCHEME_MULTIPLIER:g}x its "
+                 "usual rate (volume times the scheme's tactic weight); weights above that are scaled down.")
         if last_error:
             text += f"\n\nYour last plan was NOT applied: {last_error}\nThe ring kept its previous plan."
         return text
+
+    # A ring can't grow its operation much in a period: its members, identities, mules and devices are what they
+    # are. Until the world ties a plan to the ring's resources, the combined multiplier of a scheme (volume times its
+    # tactic weight) is capped; the tactic weights of a plan above the cap are scaled down (owner, 2026-11-16).
+    MAX_SCHEME_MULTIPLIER = 3.0
+
+    def cap(self, plan: dict) -> dict:
+        plan = json.loads(json.dumps(plan))
+        vol = float(plan.get("volume", 1.0))
+        if vol > self.MAX_SCHEME_MULTIPLIER:
+            plan["volume"] = vol = self.MAX_SCHEME_MULTIPLIER
+        tactics = plan.get("tactics") or {}
+        for t, w in list(tactics.items()):
+            if vol * float(w) > self.MAX_SCHEME_MULTIPLIER:
+                tactics[t] = round(self.MAX_SCHEME_MULTIPLIER / vol, 4) if vol > 0 else w
+        return plan
 
     def apply_plan(self, run, ring: int, plan: dict) -> list:
         errors = menus.validate_plan(plan, self.schema(ring))
         if errors:
             raise ValueError("; ".join(errors[:10]))
-        return menus.apply_plan(run, ring, plan, world=self.world)
+        return menus.apply_plan(run, ring, self.cap(plan), world=self.world)
 
     def ring_loss(self, run, ring: int) -> float:
         """What the ring has taken so far, by the world's own account: the losses of its incidents (grader side)."""

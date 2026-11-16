@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 from contextlib import contextmanager
@@ -14,7 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
-from .config import EpisodeConfig
+from .config import INSTITUTIONS, EpisodeConfig
 from .runners import McpServer
 
 
@@ -106,6 +107,41 @@ class RunmereEngine:
             "-m", "fraud_arena.toolserver", "--data", str(data), "--decisions", str(meta / "decisions.json"),
             "--workspace", str(ws), "--format", str(fmt)))
 
+    SIGNALS = re.compile(r"DISPUTE|CHARGEBACK|CLAIM|RETURN|COMPLAINT|ALERT|FRAUD|TICKET|REFUND|CASE|REVIEW|SAR|REPORT")
+
+    def fraud_signals(self, data: Path, previous: Path | None, cfg, end_day: int) -> dict:
+        """What the institution newly learned about fraud since its last turn, from its own tables: for each table
+        that records fraud reports, disputes, returns, claims, complaints, alerts or reviews, the rows (and amounts)
+        that weren't there at the previous boundary. At the first boundary, the rows of the last 30 days. Only the
+        institution's own records, as of now."""
+        c = duckdb.connect()
+        out = {}
+        for f in sorted(Path(data).rglob("*.parquet")):
+            name = f.stem.upper()
+            if not self.SIGNALS.search(name):
+                continue
+            cols = c.execute("describe select * from read_parquet(?)", [str(f)]).fetchall()
+            amt = next((n for n, t, *_ in cols if (n.endswith("_AMT") or n.endswith("AMOUNT"))
+                        and t.split("(")[0] in ("DOUBLE", "DECIMAL", "FLOAT", "BIGINT", "INTEGER")), None)
+            agg = f'count(*), coalesce(sum("{amt}"), 0)' if amt else "count(*), 0"
+            now = c.execute(f"select {agg} from read_parquet(?)", [str(f)]).fetchone()
+            old = (0, 0)
+            prev = previous / f.relative_to(data) if previous else None
+            if prev is not None and prev.exists():
+                old = c.execute(f"select {agg} from read_parquet(?)", [str(prev)]).fetchone()
+            elif previous is None:
+                ts = next((n for n, t, *_ in cols if t.startswith("TIMESTAMP")), None)
+                if ts is None:
+                    continue
+                old = c.execute(f'select {agg} from read_parquet(?) where "{ts}" < ?::timestamptz',
+                                [str(f), self.day_iso(cfg, end_day - 30)]).fetchone()
+            rec = {"new_rows": int(now[0] - old[0]), "total_rows": int(now[0])}
+            if amt:
+                rec[f"new_{amt.lower()}"] = round(float(now[1] - old[1]), 2)
+            if rec["total_rows"]:
+                out[name] = rec
+        return out
+
     def own_outcomes(self, run, cfg, start_day: int, end_day: int) -> dict:
         """The institution's own decisions in the period, by decision and action: what it knows it did."""
         dec = run.truth_table("decisions")
@@ -126,13 +162,35 @@ class RunmereEngine:
         if truth.exists():
             shutil.rmtree(truth)
         run.write_truth(str(truth))
-        acc = run.entities("account", ["institution"])
+        # Who bears a posting: a bank or exchange account is its institution's, except that an account a merchant
+        # of the game (Hopcrate, Kellmont) holds is that merchant's (its refunds and payouts are its losses); the
+        # merchants' businesses and their customers' shop accounts are theirs too.
         inst = run.entities("institution")
         name_col = "name" if "name" in inst.column_names else inst.column_names[1]
-        by_id = dict(zip(inst.column("entity").to_pylist(), inst.column(name_col).to_pylist()))
-        owners = pa.table({
-            "entity": acc.column("entity").to_pylist() + list(by_id),
-            "institution": [by_id.get(i, i) for i in acc.column("institution").to_pylist()] + list(by_id.values()),
-        })
+        inst_name = dict(zip(inst.column("entity").to_pylist(), inst.column(name_col).to_pylist()))
+        bus = run.entities("business", ["brand_key"])
+        merchant = {e: k for e, k in zip(bus.column("entity").to_pylist(), bus.column("brand_key").to_pylist())
+                    if k in INSTITUTIONS}
+        ents, owner = [], []
+        acc = run.entities("account", ["institution", "holder"])
+        for e, i, h in zip(acc.column("entity").to_pylist(), acc.column("institution").to_pylist(),
+                           acc.column("holder").to_pylist()):
+            ents.append(e)
+            owner.append(merchant.get(h) or inst_name.get(i, i))
+        for e, k in merchant.items():
+            ents.append(e)
+            owner.append(k)
+        try:
+            shop = run.entities("shop_account", ["merchant"])
+            for e, m in zip(shop.column("entity").to_pylist(), shop.column("merchant").to_pylist()):
+                if m in merchant:
+                    ents.append(e)
+                    owner.append(merchant[m])
+        except Exception:  # a world without shop accounts
+            pass
+        for e, n in inst_name.items():
+            ents.append(e)
+            owner.append(n)
+        owners = pa.table({"entity": ents, "institution": owner})
         pq.write_table(owners, out / "owners.parquet")
         return truth, out / "owners.parquet"

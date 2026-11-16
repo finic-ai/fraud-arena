@@ -282,3 +282,11 @@ def test_block_all_baseline_picks_the_most_adverse_action(tmp_path):
     import yaml
     rules = yaml.safe_load((tmp_path / "bundle" / "policy.yaml").read_text())["rules"]
     assert {r["decision"]: r["action"] for r in rules} == {"a": "decline", "b": "standard", "c": "deny"}
+
+
+def test_attacker_plans_are_capped_at_three_times_a_scheme():
+    from fraud_arena.attacker.game_api import Attackers
+    a = Attackers.__new__(Attackers)
+    p = a.cap({"volume": 2.5, "tactics": {"ato_phishing": 3, "mule_flow": 1}})
+    assert p["volume"] == 2.5 and p["tactics"]["ato_phishing"] == 1.2 and p["tactics"]["mule_flow"] == 1
+    assert a.cap({"volume": 4})["volume"] == 3.0
