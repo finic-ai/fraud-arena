@@ -138,7 +138,7 @@ def test_defender_tables_are_rewritten_before_the_tool_server_starts(tmp_path):
             yield McpServer("arena", url="http://x/mcp")
 
     class TG:
-        def rewrite(self, data, institution):
+        def rewrite(self, data, institution, **kw):
             seen.append(("rewrite", institution, data.name))
             return {"tables": {"CALLS": {"rows": 1}}, "seconds": 0.0, "tokens": {}}
 
@@ -151,3 +151,54 @@ def test_defender_tables_are_rewritten_before_the_tool_server_starts(tmp_path):
     assert seen[:2] == [("rewrite", "brindlemark", "defender-brindlemark-day180"), ("server", "defender-brindlemark")]
     rec = next(r for r in logs if r.get("event") == "textgen")
     assert rec["boundary"] == 180 and rec["tables"]["CALLS"]["rows"] == 1
+
+
+def test_attacker_briefs_reach_the_next_boundarys_rewrite(tmp_path):
+    import yaml
+    world = tmp_path / "w.yaml"
+    world.write_text(yaml.safe_dump({
+        "observers": {"brindlemark": {"tables": {"CALLS": {"grain": {"event": "bank_call"}}}}},
+        "world": {"scenarios": {"r7_ach_return": {"emit": "bank_call"}}}}))
+    calls, briefs_seen = [], []
+
+    class E(Engine):
+        def write_tables(self, run, cfg, tag=None):
+            d = tmp_path / f"{tag}-day{run.day}"
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+
+        def write_truth(self, run, out):
+            out.mkdir(parents=True, exist_ok=True)
+            calls.append(run.day)
+
+    class TG:
+        def rewrite(self, data, institution, causes=None, briefs=None):
+            briefs_seen.append(json.loads(json.dumps(briefs)))
+            return {"generator": "fake:1", "tables": {"CALLS": {"rows": 2, "generated": 2, "fallbacks": 1,
+                                                                "refusals": {"link": 1}}}, "tokens": {}, "seconds": 0}
+
+    class A(Attackers):
+        def brief(self, **k):
+            briefs_seen.append(("brief", k.get("attacker_text")))
+            return "plan"
+
+    def plan_and_brief(ws):
+        (ws / "plan.json").write_text("{}")
+        (ws / "briefs").mkdir(exist_ok=True)
+        (ws / "briefs" / "ach_return.md").write_text("calm callers")
+        (ws / "briefs" / "bank_hopping.md").write_text("not a text scheme")
+
+    cfg = GameConfig(world=world, seed=1, start_day=180, period_days=10, horizon_days=20, text_generator="fake:1",
+                     attacker_text=True)
+    d = Player("defender-brindlemark", "defender", "brindlemark", Scripted("claude-code", lambda ws: None))
+    g = Game(cfg, E(), [d], tmp_path / "out", tmp_path / "sb", attacker_api=A(),
+             attacker_runners=lambda i, ring: Scripted("codex", plan_and_brief), log=lambda r: None, textgen=TG())
+    res = g.run()
+    assert calls == [180, 190]
+    assert briefs_seen[0] == {} and ("brief", True) in briefs_seen and briefs_seen[2] == {"7": {"ach_return":
+                                                                                               "calm callers"}}
+    assert (tmp_path / "out" / "briefs" / "attacker-r7-180" / "ach_return.md").exists()
+    assert any("bank_hopping" in n for n in g.brief_notes["attacker-r7"])
+    m = res["text"]["by_model"]["fake:1"]
+    assert m["rows"] == 4 and m["fallbacks"] == 2 and m["refusals"] == {"link": 2}
+    assert "textcheck" in res["text"]

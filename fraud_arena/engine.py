@@ -174,6 +174,12 @@ class RunmereEngine:
             out.setdefault(d, {})[a] = n
         return {"days": [start_day, end_day], "decisions": out}
 
+    def write_truth(self, run, out: Path) -> Path:
+        """The run's truth as of now (grader side only), with `row_links` for the rows written so far."""
+        Path(out).mkdir(parents=True, exist_ok=True)
+        run.write_truth(str(out))
+        return Path(out)
+
     def export_scoring(self, run, cfg, out: Path) -> tuple[Path, Path]:
         out.mkdir(parents=True, exist_ok=True)
         truth = out / "truth"

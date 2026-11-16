@@ -18,6 +18,7 @@ the same boundary; the runs stay in memory, so nothing is checkpointed. At the h
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -75,6 +76,9 @@ class GameConfig:
     # codex:<model>, or None for the world's own template text.
     text_generator: str | None = None
     text_cache: Path | None = None
+    # Attackers write a brief per scheme (`briefs/<scheme>.md`) and the rows their rings caused are written from it,
+    # with the generator above (the attackers' model); every other row from the world's brief.
+    attacker_text: bool = False
 
     def boundaries(self):
         end = self.start_day + self.horizon_days
@@ -103,6 +107,12 @@ class Game:
         self.grayson_gates: dict[str, tuple[str, dict]] = {}  # decision -> (defender, question)
         self.grayson_live: dict[str, object] = {}
         self.textgen = textgen if textgen is not None else _textgen(cfg, Path(out))
+        self.briefs: dict[int, dict[str, str]] = {}  # ring -> scheme -> its attacker's latest brief
+        self.brief_notes: dict[str, list[str]] = {}
+        self.text_causes = None
+        self.text_truth: Path | None = None
+        self.text_folders: dict[str, Path] = {}
+        self.text_stats: dict = {}
         from .review import Reviewer
         self.reviewer = Reviewer()
         self.review_on: set[str] = set()
@@ -242,6 +252,8 @@ class Game:
             self.log({"event": "grayson_live", "day": d, "asked": len(reqs), "answered": len(answers)})
 
     def _period(self, game, b: int, first: bool) -> list[Turn]:
+        if self.textgen is not None:
+            self._row_causes(game, b)
         jobs = [(p, self._prepare(game, p, b, first)) for p in self.players]
         with ThreadPoolExecutor(len(jobs)) as pool:
             results = list(pool.map(lambda j: self._session(j[0], b, *j[1]), jobs))
@@ -258,8 +270,10 @@ class Game:
             st = self.state[p.name]
             data = self.engine.write_tables(game, ecfg, tag=p.name)
             if self.textgen is not None and data is not None:
-                stats = self.textgen.rewrite(data, p.target)
+                stats = self.textgen.rewrite(data, p.target, causes=self.text_causes, briefs=self.briefs)
                 self.log({"event": "textgen", "player": p.name, "boundary": b, **stats})
+                self._count_text(stats)
+                self.text_folders[p.target] = Path(data)
             since = max(cfg.start_day, b - cfg.period_days)
             outcomes = self.engine.own_outcomes(game, ecfg, since, b)
             outcomes["fraud_signals"] = self.engine.fraud_signals(data, self.last_tables.get(p.name), ecfg, b)
@@ -283,7 +297,8 @@ class Game:
         bounds = cfg.boundaries()
         prompt = self.attacker.brief(ring=p.target, day=b, end_day=cfg.start_day + cfg.horizon_days,
                                      period_days=cfg.period_days, first=first, last_error=st.last_error,
-                                     boundary=bounds.index(b) + 1, boundaries=len(bounds) - 1)
+                                     boundary=bounds.index(b) + 1, boundaries=len(bounds) - 1,
+                                     attacker_text=cfg.attacker_text, text_notes=self.brief_notes.get(p.name))
         return prompt, None
 
     def _session(self, p: Player, b: int, prompt: str, server_factory):
@@ -345,6 +360,8 @@ class Game:
                 applied = f"plan@{b}"
         except Exception as e:  # refused bundles and plans go back to the player next period
             err = f"{type(e).__name__}: {e}"
+        if p.side == "attacker" and self.cfg.attacker_text:
+            self._take_briefs(p, b)
         if p.side == "defender" and p.name in self.review_on:
             from .review import REVIEWS_PER_DAY
             rpath = self.workspace(p) / "bundle" / "reviews.json"
@@ -419,11 +436,79 @@ class Game:
         result |= {"config": {k: str(v) for k, v in asdict(cfg).items()},
                    "players": [{"name": p.name, "side": p.side, "target": p.target, "runner": p.runner.name,
                                 "model": p.runner.model} for p in self.players],
-                   "turns": [asdict(t) for t in self.turns], "tokens": tokens, "finished": time.time()}
+                   "turns": [asdict(t) for t in self.turns], "tokens": tokens, "text": self._text_summary(),
+                   "finished": time.time()}
         tmp = self.out / "result.json.tmp"
         tmp.write_text(json.dumps(result, indent=2, default=str))
         tmp.rename(self.out / "result.json")
         return result
+
+
+    def _row_causes(self, game, b: int):
+        """The run's truth as of the boundary, grader side: which rows the attacker rings caused (for their briefs),
+        and at the last boundary the labels for the style check."""
+        bounds = self.cfg.boundaries()
+        write = getattr(self.engine, "write_truth", None)
+        self.text_causes = None
+        if write is None or not (self.cfg.attacker_text or b == bounds[-2]):
+            return
+        from .textgen import RowCauses
+
+        truth = self.out / "textgen-truth"
+        if truth.exists():
+            shutil.rmtree(truth)
+        write(game, truth)
+        self.text_truth = truth
+        rings = sorted(p.target for p in self.players if p.side == "attacker")
+        self.text_causes = RowCauses(truth, rings if self.cfg.attacker_text else [])
+
+    def _take_briefs(self, p: Player, b: int):
+        from .textgen import read_briefs, scheme_texts
+
+        allowed = set(scheme_texts(self.cfg.world, p.target))
+        briefs, notes = read_briefs(self.workspace(p) / "briefs", allowed)
+        self.briefs[p.target] = briefs
+        self.brief_notes[p.name] = notes
+        if briefs:
+            keep = self.out / "briefs" / f"{p.name}-{b}"
+            keep.mkdir(parents=True, exist_ok=True)
+            for scheme, text in briefs.items():
+                (keep / f"{scheme}.md").write_text(text)
+        self.log({"event": "attacker_briefs", "player": p.name, "boundary": b, "schemes": sorted(briefs),
+                  "refused": notes})
+
+    def _count_text(self, stats: dict):
+        agg = self.text_stats.setdefault(stats.get("generator", "?"), {"rows": 0, "generated": 0, "cache_hits": 0,
+                                                                     "fallbacks": 0, "from_attacker_briefs": 0,
+                                                                     "refusals": {}, "tokens": {}, "seconds": 0.0})
+        for t in (stats.get("tables") or {}).values():
+            for k in ("generated", "cache_hits", "fallbacks", "from_attacker_briefs"):
+                agg[k] += t.get(k, 0)
+            agg["rows"] += t.get("rows", 0)
+            for why, n in (t.get("refusals") or {}).items():
+                agg["refusals"][why] = agg["refusals"].get(why, 0) + n
+        for k, v in (stats.get("tokens") or {}).items():
+            agg["tokens"][k] = agg["tokens"].get(k, 0) + v
+        agg["seconds"] += stats.get("seconds", 0.0)
+
+    def _text_summary(self) -> dict | None:
+        if self.textgen is None:
+            return None
+        out = {"attacker_text": self.cfg.attacker_text, "by_model": self.text_stats}
+        if self.text_truth is not None and self.text_folders:
+            from . import textcheck
+
+            folders = dict(self.text_folders)
+            pub = next(iter(self.text_folders.values())) / "public"
+            if pub.is_dir():
+                folders["public"] = pub
+            ring_rows = self.text_causes.ring_rows() if self.text_causes is not None and self.cfg.attacker_text \
+                else None
+            try:
+                out["textcheck"] = textcheck.check(self.text_truth, folders, ring_rows)
+            except Exception as e:  # the check must never cost a match its result
+                out["textcheck"] = {"error": f"{type(e).__name__}: {e}"}
+        return out
 
 
 def _textgen(cfg: GameConfig, out: Path):
@@ -432,7 +517,8 @@ def _textgen(cfg: GameConfig, out: Path):
     gen = make_generator(cfg.text_generator, workdir=out / "textgen-work")
     if gen is None:
         return None
-    return TextGen(gen, cfg.text_cache or out / "textgen-cache", seed=cfg.seed, world=cfg.world)
+    return TextGen(gen, cfg.text_cache or out / "textgen-cache", seed=cfg.seed, world=cfg.world,
+                   match=str(out.resolve()))
 
 
 def ring_take(truth: Path, ring: str, start: str, end: str) -> float:

@@ -69,6 +69,18 @@ def _player_runner(spec: str, a, user: str):
     return RUNNERS[kind](model, extra_env=env, as_user=user, proxy=a.proxy, timeout_s=a.session_timeout)
 
 
+def _text_generator_spec(a) -> str | None:
+    """With attacker-authored text the generator is the attackers' model, for their rows and every other row alike."""
+    if a.attacker_text == "on":
+        if not a.attackers or a.attackers.split(":", 1)[0] == "baseline":
+            raise SystemExit("--attacker-text on needs --attackers runner:model (the text generator is their model)")
+        if a.text_generator not in ("none", a.attackers):
+            raise SystemExit(f"--attacker-text on generates with the attackers' model ({a.attackers}); "
+                             f"drop --text-generator {a.text_generator}")
+        return a.attackers
+    return None if a.text_generator == "none" else a.text_generator
+
+
 def _textgen(cfg, a, log):
     """The text generator runs grader side, as the harness user (Codex as its shared login), through the proxy."""
     from .textgen import TextGen, make_generator
@@ -83,7 +95,8 @@ def _textgen(cfg, a, log):
         user, env["CODEX_HOME"] = "arena-codex", "/home/arena-codex/.codex"
     gen = make_generator(cfg.text_generator, as_user=user, proxy=a.proxy, extra_env=env,
                          workdir=Path(a.out) / "textgen-work")
-    return TextGen(gen, cfg.text_cache, seed=cfg.seed, world=cfg.world, workers=a.text_workers, log=log)
+    return TextGen(gen, cfg.text_cache, seed=cfg.seed, world=cfg.world, workers=a.text_workers, log=log,
+                   match=str(Path(a.out).resolve()))
 
 
 def game(a) -> int:
@@ -95,7 +108,7 @@ def game(a) -> int:
     cfg = GameConfig(world=Path(a.world), seed=a.seed, roots=a.roots, partitions=a.partitions,
                      start_day=a.start_day, period_days=a.period_days, horizon_days=a.horizon_days,
                      grayson_calls_per_period=a.grayson_budget, settle_days=a.settle_days,
-                     text_generator=None if a.text_generator == "none" else a.text_generator,
+                     text_generator=_text_generator_spec(a), attacker_text=a.attacker_text == "on",
                      text_cache=Path(a.text_cache).expanduser())
     engine = RunmereEngine(Path(a.sandbox))
     users = iter(f"arena-p{n}" for n in range(1, 13))
@@ -155,6 +168,8 @@ def main(argv=None) -> int:
                    help="claude-code:sonnet|claude-code:opus|codex:<model>|none: rewrites the defenders' rich text")
     q.add_argument("--text-cache", default="~/.cache/fraud-arena/textgen", help="kept across boundaries and games")
     q.add_argument("--text-workers", type=int, default=4)
+    q.add_argument("--attacker-text", choices=["on", "off"], default="off",
+                   help="attackers brief their schemes' texts; every text is generated with the attackers' model")
     q.add_argument("--settle-days", type=int, default=30, help="frozen run-on after the last period, before scoring")
     q.add_argument("--proxy")
     q.add_argument("--codex-home", default="/srv/codex-home")
