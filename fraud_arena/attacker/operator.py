@@ -32,6 +32,9 @@ class OperatorConfig:
     model: str = "opus"
     timeout_s: int = 3600
     extra_env: dict[str, str] = field(default_factory=dict)
+    # As the defender's sessions: run as this user, with network only through this allowlisting proxy.
+    as_user: str | None = None
+    proxy: str | None = None
 
     def __post_init__(self):
         if self.ring not in menu.RINGS:
@@ -58,7 +61,8 @@ class BoundaryResult:
 
 
 def make_runner(cfg: OperatorConfig) -> AgentRunner:
-    return RUNNERS[cfg.runner](cfg.model, timeout_s=cfg.timeout_s, extra_env=cfg.extra_env)
+    return RUNNERS[cfg.runner](cfg.model, timeout_s=cfg.timeout_s, extra_env=cfg.extra_env, as_user=cfg.as_user,
+                               proxy=cfg.proxy)
 
 
 def _menu_text(schema: dict) -> str:

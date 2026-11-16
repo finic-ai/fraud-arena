@@ -102,3 +102,40 @@ def test_one_boundary(tmp_path, plan, scripted):
     assert r.model_version == "claude-opus-test" and r.usage["input_tokens"] == 10
     rec = json.loads((tmp_path / "logs" / "attacker.jsonl").read_text().splitlines()[-1])
     assert rec["ring"] == 1 and rec["model"] == "fake-model"
+
+
+class FakeRun:
+    """What the panel reads and writes of a `runmere.Run`."""
+
+    def __init__(self):
+        self.set = []
+
+    def rows(self, entity_type, attrs, where_attr=None, equals=None):
+        if entity_type == "ring":
+            r = snap({})["ring"]
+            return [{"id": "r1", **{a: r.get(a) for a in attrs}}] if equals == 1 else []
+        if entity_type == "institution":
+            return [{"id": "i1", "name": "brindlemark"}]
+        return []
+
+    def intervene(self, entity_type, entity, attr, value):
+        self.set.append((entity_type, entity, attr, value))
+
+
+@needs_world
+def test_the_panel_runs_operated_rings_and_resumes(tmp_path, monkeypatch):
+    from fraud_arena.attacker import panel as panel_mod
+    monkeypatch.setattr(panel_mod, "make_runner", lambda cfg: FakeRunner({"quiet": True}))
+    p = panel_mod.AttackerPanel([operator.OperatorConfig(ring=1)], world=WORLD, root=tmp_path, epoch_ms=1735689600000)
+    run = FakeRun()
+    out = p.boundary(run, day=7, period_days=7, boundary=1, boundaries=2)
+    assert [r.plan for r in out] == [{"quiet": True}]
+    assert ("ring", "r1", "plan_quiet", True) in run.set
+    again = panel_mod.AttackerPanel([operator.OperatorConfig(ring=1)], world=WORLD, root=tmp_path,
+                                    epoch_ms=1735689600000)
+    run2 = FakeRun()
+    assert again.boundary(run2, day=7, period_days=7, boundary=1, boundaries=2) == []
+    assert run2.set == run.set
+    ref = FakeRun()
+    again.replay(ref, 7)
+    assert ref.set == run.set

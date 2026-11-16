@@ -4,10 +4,12 @@
   interventions a plan sets.
 - `view`: what a ring knows at a boundary, filtered from truth on the grader's side.
 - `operator`: one headless agent session per ring per boundary, through `fraud_arena.runners`.
+- `panel`: the operators of an episode, boundary by boundary, with their state for resuming.
 """
 from .menu import RINGS, apply_plan, interventions, plan_schema, validate_plan
 from .operator import BoundaryResult, OperatorConfig, make_runner, run_boundary
+from .panel import AttackerPanel
 from .view import ring_view, snapshot
 
-__all__ = ["RINGS", "BoundaryResult", "OperatorConfig", "apply_plan", "interventions", "make_runner", "plan_schema",
+__all__ = ["AttackerPanel", "RINGS", "BoundaryResult", "OperatorConfig", "apply_plan", "interventions", "make_runner", "plan_schema",
            "ring_view", "run_boundary", "snapshot", "validate_plan"]

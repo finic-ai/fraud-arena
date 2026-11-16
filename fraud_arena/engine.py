@@ -71,7 +71,7 @@ class RunmereEngine:
         return {d["decision"] for d in self.decision_points(cfg)}
 
     def day_iso(self, cfg, day: int) -> str:
-        epoch = datetime.fromisoformat(self.spec(cfg)["world"]["epoch"].replace("Z", "+00:00"))
+        epoch = datetime.fromisoformat(self.spec(cfg)["clock"]["epoch"].replace("Z", "+00:00"))
         return (epoch + timedelta(days=day)).astimezone(timezone.utc).isoformat()
 
     def _agent_dir(self, cfg, name: str) -> Path:
