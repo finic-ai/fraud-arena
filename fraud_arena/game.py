@@ -120,6 +120,10 @@ class Game:
         self.good_wf_snap: dict[str, Path | None] = {}
         self.workflow_stats: dict[str, dict] = {}
         self.queue_stats: dict[str, dict] = {}
+        self.integrations: dict[str, object] = {}  # defender -> its integrations Resolver
+        self._kinds: dict[str, dict[str, str]] | None = None
+        self.good_integrations: dict[str, object] = {}
+        self._cur_day = 0
         import threading
         self._text_lock = threading.Lock()
         self.queue_grayson: dict[str, tuple[str, dict]] = {}  # defender -> (institution, grayson config)
@@ -290,12 +294,17 @@ class Game:
                     del self.deployed[role]
                 owner = self.owner_of_role[role]
                 self._set_workflow(owner, self.good_wf_snap.get(owner))
+                if owner in self.good_integrations:
+                    self.integrations[owner] = self.good_integrations[owner]
+                else:
+                    self.integrations.pop(owner, None)
                 msg = f"your bundle failed at run time and was taken back ({'previous bundle' if good is not None else 'built-in rules'} in force): {e}"
                 self.state[owner].last_error = msg
                 self.log({"event": "bundle_failed", "player": owner, "role": role, "error": str(e)[:300]})
                 continue
             self.good.update(self.deployed)
             self.good_wf_snap.update(self.wf_snap)
+            self.good_integrations = dict(self.integrations)
             return trial
         raise RuntimeError(f"the game run can't advance to day {day}")
 
@@ -303,7 +312,7 @@ class Game:
         """Runs to `day`. When cases wait for outside decisions (a defender's workflow, or Grayson at a gate), the run
         goes one simulated day at a time and each time it stops, the waiting cases go out in one batch per decision and
         their answers go back before it continues."""
-        outside = bool(self.grayson_gates or self.workflow_dec) and hasattr(run, "pending_external")
+        outside = bool(self.grayson_gates or self.workflow_dec or self.integrations) and hasattr(run, "pending_external")
         if not outside and not self.queue_grayson and not self.workflows:
             if self.replay is None:
                 run.run_until_day(day)
@@ -334,13 +343,14 @@ class Game:
             if outside and self._day_stats["stops"] + self._day_stats["answered"]:
                 self.log({"event": "outside_decisions", "day": d, **self._day_stats})
             self._replay_day(run, d - 1)
-            if self.workflows and d < day:
+            if (self.workflows or self.integrations) and d < day:
                 self._write_live(run)
 
     def _write_live(self, run) -> None:
-        """Defenders with a deployed workflow get their tables (and the public data) as of each day's end in `live/`,
-        with the rich text rewritten as at a boundary (rows written before come from the cache)."""
-        owners = list(self.workflows)
+        """Defenders with a workflow or integrations get their tables (and the public data) as of each day's end,
+        with the rich text rewritten as at a boundary (rows written before come from the cache): integrations read
+        the grader's copy, a workflow reads `live/` in its workspace."""
+        owners = sorted(set(self.workflows) | set(self.integrations))
         if not owners:
             return
         if self.textgen is not None and self.cfg.attacker_text:
@@ -351,16 +361,40 @@ class Game:
             ecfg = self.cfg.for_institution(p.target)
             rewrite = None
             if self.textgen is not None:
-                def rewrite(folder, inst=p.target, name=p.name):
+                def rewrite(folder, inst=p.target):
                     stats = self.textgen.rewrite(folder, inst, causes=self.text_causes, briefs=self.briefs)
                     with self._text_lock:
                         self._count_text(stats)
             try:
-                self.engine.write_live(run, ecfg, self.workspace(p) / "live", rewrite=rewrite)
+                grader = self.out / "live" / owner
+                self.engine.write_live(run, ecfg, grader, rewrite=rewrite)
+                if owner in self.integrations:
+                    self.integrations[owner].data.load(grader)
+                if owner in self.workflows:
+                    dest = self.workspace(p) / "live"
+                    tmp = dest.with_name("live.tmp")
+                    shutil.rmtree(tmp, ignore_errors=True)
+                    shutil.copytree(grader, tmp)
+                    shutil.rmtree(dest, ignore_errors=True)
+                    tmp.rename(dest)
             except Exception as e:
                 self.log({"event": "live_tables_failed", "player": owner, "error": str(e)[:200]})
         with ThreadPoolExecutor(len(owners)) as pool:
             list(pool.map(one, owners))
+
+    def _set_integrations(self, p, ints: dict) -> None:
+        """Puts a defender's integrations in force, reading its tables as of this boundary."""
+        from . import integrations as integ
+        if not ints:
+            self.integrations.pop(p.name, None)
+            return
+        data = integ.Data()
+        tables = self.last_tables.get(p.name)
+        if tables is not None and Path(tables).exists():
+            data.load(Path(tables))
+        self.integrations[p.name] = integ.Resolver(
+            ints, data, self.broker.client(p.name), case_view=self._case_view,
+            log=lambda rows, o=p.name: self._log_live(o, float(self._cur_day), rows))
 
     def _answer_outside(self, run, d: int) -> int:
         waiting = run.pending_external()
@@ -368,6 +402,9 @@ class Game:
             return 0
         from .bundle import grayson_action
         from .workflow import WorkflowError
+        self._cur_day = d
+        feature_answers = self._answer_features([w for w in waiting if w.get("needs")])
+        waiting = [w for w in waiting if not w.get("needs")]
         answers = []
         by_wf: dict[tuple[str, str], list] = {}
         by_owner: dict[str, list] = {}
@@ -388,7 +425,7 @@ class Game:
                 if not crit:
                     continue
                 questions = {"decision": {"type": "choice", "instructions": q["instructions"], "criteria": crit}}
-            req = {"data": w["features"] | {"decision": w["decision"]}, "questions": questions}
+            req = {"data": self._case_view(w) | {"decision": w["decision"]}, "questions": questions}
             by_owner.setdefault(owner, []).append((w, q, avail, req))
         def run_owner(owner):
             # One defender's batches in order (its workflow is one process); defenders run side by side, so one
@@ -444,15 +481,57 @@ class Game:
         defaulted = [(w["key"], w["default_action"]) for w in waiting
                      if w.get("gate") == "event" and w["key"] not in done and w.get("default_action")]
         answers += defaulted
-        if answers:
-            run.answer_external(answers)
+        if answers or feature_answers:
+            run.answer_external({k: a for k, a in answers} | feature_answers)
         st = getattr(self, "_day_stats", None)
         if st is not None:
             st["workflow"] += sum(len(v) for v in by_wf.values())
             st["grayson_asked"] += asked
-            st["answered"] += len(answers)
+            st["answered"] += len(answers) + len(feature_answers)
             st["defaulted"] += len(defaulted)
         return len(answers)
+
+    def _feature_kinds(self) -> dict[str, dict[str, str]]:
+        if self._kinds is None:
+            self._kinds = {}
+            for inst in INSTITUTIONS:
+                try:
+                    for dp in self.engine.decision_points(self.cfg.for_institution(inst)):
+                        self._kinds[dp["decision"]] = {f["name"]: str(f.get("kind", "")) for f in dp["features"]}
+                except Exception:
+                    pass
+        return self._kinds
+
+    def _case_view(self, w: dict) -> dict:
+        """What outside code shows a decision model about a case: its features, without free text (the world's text
+        reaches players only in its model-written form), plus its display identifiers."""
+        kinds = self._feature_kinds().get(w["decision"], {})
+        feats = {k: v for k, v in (w.get("features") or {}).items()
+                 if not any(t in kinds.get(k, "") for t in ("str", "text"))}
+        return feats | {k: v for k, v in (w.get("identifiers") or {}).items() if v is not None}
+
+    def _answer_features(self, cases: list[dict]) -> dict[str, dict]:
+        """Values for the outside features cases wait for, from their defenders' integrations; a feature no
+        integration gives (or one that failed) gets no information: uniform options, or 0."""
+        if not cases:
+            return {}
+        by_owner: dict[str, list] = {}
+        for c in cases:
+            owner = self.owner_of_role.get(self.role_of_decision.get(c["decision"], c.get("role")), None)
+            by_owner.setdefault(owner, []).append(c)
+        out: dict[str, dict] = {}
+        for owner, cs in by_owner.items():
+            res = self.integrations.get(owner)
+            got = res.answer(cs) if res is not None else {}
+            for c in cs:
+                ans = got.get(c["key"], {})
+                for n in c["needs"]:
+                    if n not in ans:
+                        i = res.integrations.get(n) if res is not None else None
+                        ans[n] = ({o: 1.0 / len(i.options) for o in i.options} if i is not None and
+                                  i.source == "grayson" else 0.0)
+                out[c["key"]] = ans
+        return out
 
     def _set_workflow(self, owner: str, snap: Path | None) -> None:
         """Puts `owner`'s workflow from the frozen bundle `snap` in force (None: no workflow)."""
@@ -655,6 +734,16 @@ class Game:
                     policy = json.loads(json.dumps(bun.policy))
                     policy.pop("review_queue", None)
                     gray = bundles.take_grayson(policy)
+                    from . import integrations as integ
+                    if "outside" in policy:
+                        raise bundles.BundleError("declare outside features through `integrations`")
+                    try:
+                        ints = integ.parse(policy)
+                    except integ.IntegrationError as e:
+                        raise bundles.BundleError(str(e)) from None
+                    if any(i.source == "grayson" for i in ints.values()) and not self.cfg.grayson:
+                        raise bundles.BundleError("Grayson isn't available in this game")
+                    integ.declare(policy, ints)
                     if (gray or (bun.policy.get("review_queue") or {}).get("grayson")) and not self.cfg.grayson:
                         raise bundles.BundleError("Grayson isn't available in this game")
                     snap, claimed = None, []
@@ -716,6 +805,7 @@ class Game:
                             game.undeploy(role)
                             del self.deployed[role]
                     self._set_workflow(p.name, snap)
+                    self._set_integrations(p, ints)
                     if snap is not None:
                         live = self.last_tables.get(p.name)
                         dest = self.workspace(p) / "live"
@@ -845,7 +935,9 @@ class Game:
                         paid, cached = paid + (not cached_), cached + bool(cached_)
             wf = self.workflow_stats.get(p.name)
             out[p.name] = {"workflow": wf and wf | {"seconds": round(wf["seconds"], 1)},
-                           "review_queue": self.queue_stats.get(p.name), "grayson_calls": paid,
+                           "review_queue": self.queue_stats.get(p.name),
+                           "integrations": (self.integrations[p.name].stats if p.name in self.integrations else None),
+                           "grayson_calls": paid,
                            "grayson_cached": cached}
         return out
 

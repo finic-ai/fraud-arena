@@ -107,6 +107,7 @@ class Gated(Run):
     def pending_external(self): return list(self.waiting)
 
     def answer_external(self, answers):
+        answers = list(answers.items()) if isinstance(answers, dict) else list(answers)  # as the engine takes both
         keys = {k for k, _ in answers}
         assert all(w["key"] in keys for w in self.waiting), "every event-gate case needs an answer"
         self.answers += answers

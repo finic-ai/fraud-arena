@@ -44,6 +44,9 @@ or a tree ensemble dumped from XGBoost / LightGBM, see the tool `deploy_format`)
 `file:`. A decision point you don't mention keeps the institution's built-in rule.
 Every rule is checked against `decision_points`: rules, models, Grayson and review are all yours to combine as you see
 fit; nothing requires any of them.
+Your decision points can also call integrations when a case arrives: lookups in your own records and the public
+data, and Grayson questions, whose answers your rules and models read like any feature, asked only when a rule or model
+reaches them (see `deploy_format`, "Integrations").
 
 {workflow_section} Write `bundle/NOTES.md` with what
 you changed and why.

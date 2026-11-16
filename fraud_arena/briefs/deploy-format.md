@@ -81,3 +81,45 @@ review_queue:
     instructions: "Release unless this looks like fraud or a scam in progress."
     criteria: {release: "genuine", reject: "fraud or a scam"}
 ```
+
+## Integrations: data and Grayson inside your rules and models (optional)
+
+Like a fraud team's decision platform, your decision points can call data sources when a case arrives, and your
+rules and models can use what they return. Declare them in `policy.yaml`:
+
+```yaml
+integrations:
+  claims_90d:                         # your institution's own records
+    source: own_data
+    sql: "select count(*) from CLAIMS where CUST_ID = $cust and CLAIM_TS > $now - interval 90 day"
+    params: {cust: P2P.CUST_ID}       # a case identifier (<TABLE>.<COLUMN>) or feature.<name>; $now is the case's time
+    default: 0                        # when nothing is found or the lookup fails
+  payee_site:                         # the public web: your PUBLIC_* tables (ads, domains, websites, block explorer)
+    source: public
+    sql: "select * from PUBLIC_WEBSITES where DOMAIN = $d"
+    params: {d: feature.payee_domain}
+  scam_story:                         # Grayson, given the case and other integrations' rows as its data
+    source: grayson
+    instructions: "Is this payment part of a scam the customer is being coached through?"
+    criteria: {yes: "a scam in progress", no: "an ordinary payment"}
+    data: [case, claims_90d, payee_site]
+models:
+  stack: {kind: logistic, features: [amount, outside.claims_90d, outside.scam_story.yes], weights: [...], intercept: ...}
+rules:
+  - {decision: brind_payment_hold, when: "obs.amount < 200", action: release}          # never asks anything
+  - {decision: brind_payment_hold, when: "score.stack > 0.8", action: hold}
+  - {decision: brind_payment_hold, when: "obs.amount > 2000 and outside.scam_story.yes > 0.7", action: hold}
+  - {decision: brind_payment_hold, action: release}
+```
+
+- A lookup gives one number (the first column of the first row; true/false count as 1/0): `outside.<name>`. A
+  Grayson integration gives a probability per option: `outside.<name>.<option>`. Use them in rules and as model
+  features (fit your models offline on the same lookups and Grayson answers for past cases).
+- Nothing is asked until a rule or model reaches it: put cheap rules first, and a case decided earlier costs nothing.
+  Grayson calls count against your budget; when Grayson can't answer, the options are equal (no information).
+- Lookups read your tables as of the end of the previous simulated day (refreshed daily, as at a boundary, with
+  fraud reports arriving as late as they do), plus the case itself. Up to 50 rows per lookup.
+- A case's identifiers are the ids its row shows in your tables (e.g. `P2P.CUST_ID`, `P2P.ACCT_ID`); see a pending
+  case's `identifiers`. Grayson sees the case's features and identifiers, not its free text until that text is in
+  your tables.
+- What live Grayson was sent and answered is in `.arena/grayson-live.jsonl` at the next boundary.
