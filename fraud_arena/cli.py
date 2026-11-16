@@ -54,6 +54,9 @@ def pilot(a) -> int:
 
 
 def main(argv=None) -> int:
+    # The agent user shares the workspace through the `arena` group; what the harness writes there must stay
+    # writable for it.
+    os.umask(0o002)
     ap = argparse.ArgumentParser(prog="fraud-arena")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("pilot")

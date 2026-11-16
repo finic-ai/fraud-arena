@@ -48,6 +48,14 @@ class RunmereEngine:
         return self.rm.Run.restore(self.world(cfg), checkpoint, cfg.roots)
 
     def decision_points(self, cfg) -> list[dict]:
+        w = self.world(cfg)
+        if hasattr(w, "decisions"):
+            out = []
+            for d in w.decisions(cfg.role):
+                feats = [{"name": f[0], "kind": f[1]} if isinstance(f, (list, tuple)) else f for f in d["features"]]
+                out.append({"decision": d["name"], "actions": d["actions"], "default_action": d["default_action"],
+                            "observation": d.get("observation"), "params": d.get("params"), "features": feats})
+            return out
         env = self.spec(cfg)["env"]
         out = []
         for name, d in env["decisions"].items():
