@@ -219,9 +219,8 @@ def ring_score(truth: Path, owners: Path, *, ring: str, institutions, start: str
     import tempfile
     c = duckdb.connect()
     T = str(truth)
-    # The ring's own schemes are named by its number (r1_bank_hopping); shared schemes (ring_mule_flow,
-    # ring_operation) are the ring's when their anchor is: the ring itself, an entity whose `ring` is it, or one that a
-    # fraudster of the ring operates, controls or recruited.
+    from .attribution import ring_instances
+    insts = ring_instances(c, truth, ring=ring, number=number)
     fraudsters = {e for (e,) in c.execute(f"""
         select distinct entity from '{T}/hidden.parquet' where type = 'fraudster'
           and attribute in ('ring', 'second_ring') and value = ?""", [ring]).fetchall()}
@@ -230,11 +229,6 @@ def ring_score(truth: Path, owners: Path, *, ring: str, institutions, start: str
         where (attribute in ('ring', 'second_ring') and value = ?)
            or (attribute in ('operator', 'controlled_by', 'recruited_by', 'fraudster', 'herder')
                and value in (select unnest(?::varchar[])))""", [ring, sorted(fraudsters)]).fetchall()}
-    prefix = f"r{number}_" if number is not None else None
-    insts = {i for (i,) in c.execute(f"""
-        select instance from '{T}/instances.parquet'
-        where anchor in (select unnest(?::varchar[])) or (? is not null and starts_with(scenario, ?))""",
-                                     [sorted(members), prefix, prefix or ""]).fetchall()}
     tmp = Path(tempfile.mkdtemp(prefix="ring-"))
     try:
         for f in Path(T).glob("*.parquet"):

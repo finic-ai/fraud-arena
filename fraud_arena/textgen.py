@@ -359,6 +359,9 @@ def _sha(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
 
+from .attribution import ring_instances
+
+
 class RowCauses:
     """Grader side: which rows of the defenders' tables the attacker rings caused, from the run's truth as of the
     boundary (`row_links` to events to instances). A ring's instances are those of its own scenarios (`r<N>_*`) and
@@ -382,7 +385,7 @@ class RowCauses:
                            [[f"{o}/{t}" for o, t in tables]]).fetchall()
         ring_of: dict[str, int] = {}
         for n in rings:
-            for inst in self._instances(c, T, n):
+            for inst in ring_instances(c, T, number=n):
                 ring_of.setdefault(inst, n)
         for obs, table, row, kind, inst, scenario in linked:
             k = (obs, table, int(row))
@@ -390,26 +393,6 @@ class RowCauses:
                 self.fraud.add(k)
             if inst in ring_of:
                 self.rows[k] = (ring_of[inst], scheme_of(scenario))
-
-    @staticmethod
-    def _instances(c, T: Path, number: int) -> set[str]:
-        ring = [e for (e,) in c.execute(f"""select entity from '{T}/hidden.parquet'
-                where type = 'ring' and attribute = 'number' and try_cast(value as bigint) = ?""",
-                                        [number]).fetchall()]
-        fraudsters = {e for (e,) in c.execute(f"""
-            select distinct entity from '{T}/hidden.parquet' where type = 'fraudster'
-              and attribute in ('ring', 'second_ring') and value in (select unnest(?::varchar[]))""",
-                                              [ring]).fetchall()}
-        members = set(ring) | fraudsters | {e for (e,) in c.execute(f"""
-            select distinct entity from '{T}/hidden.parquet'
-            where (attribute in ('ring', 'second_ring') and value in (select unnest(?::varchar[])))
-               or (attribute in ('operator', 'controlled_by', 'recruited_by', 'fraudster', 'herder')
-                   and value in (select unnest(?::varchar[])))""", [ring, sorted(fraudsters)]).fetchall()}
-        prefix = f"r{number}_"
-        return {i for (i,) in c.execute(f"""
-            select instance from '{T}/instances.parquet'
-            where anchor in (select unnest(?::varchar[])) or starts_with(scenario, ?)""",
-                                        [sorted(members), prefix]).fetchall()}
 
     def of(self, observer: str, table: str, row: int) -> tuple[int, str] | None:
         return self.rows.get((observer, table, row))
