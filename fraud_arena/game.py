@@ -288,20 +288,38 @@ class Game:
                 questions = {"decision": {"type": "choice", "instructions": q["instructions"], "criteria": crit}}
             req = {"data": w["features"] | {"decision": w["decision"]}, "questions": questions}
             by_owner.setdefault(owner, []).append((w, q, avail, req))
-        for (owner, decision), items in sorted(by_wf.items()):
-            t0 = time.monotonic()
-            try:
-                acts = self.workflows[owner].decide(decision, [w["features"] | {"_actions": avail}
-                                                               for w, avail in items])
-            except WorkflowError as e:
-                raise ValueError(f"{decision}: {e}") from None
-            answers += [(w["key"], a) for (w, _), a in zip(items, acts)]
-            st = self.workflow_stats.setdefault(owner, {"cases": 0, "batches": 0, "seconds": 0.0, "actions": {}})
-            st["cases"] += len(items)
-            st["batches"] += 1
-            st["seconds"] = round(st["seconds"] + time.monotonic() - t0, 2)
-            for a in acts:
-                st["actions"][f"{decision}:{a}"] = st["actions"].get(f"{decision}:{a}", 0) + 1
+        def run_owner(owner):
+            # One defender's batches in order (its workflow is one process); defenders run side by side, so one
+            # waiting on Grayson doesn't hold the others.
+            res = []
+            for (o, decision), items in sorted(by_wf.items()):
+                if o != owner:
+                    continue
+                t0 = time.monotonic()
+                try:
+                    acts = self.workflows[owner].decide(decision, [w["features"] | {"_actions": avail}
+                                                                   for w, avail in items])
+                except WorkflowError as e:
+                    return ValueError(f"{decision}: {e}")
+                res.append((decision, items, acts, time.monotonic() - t0))
+            return res
+        owners = sorted({o for o, _ in by_wf})
+        if len(owners) > 1:
+            with ThreadPoolExecutor(len(owners)) as pool:
+                results = list(pool.map(run_owner, owners))
+        else:
+            results = [run_owner(o) for o in owners]
+        for owner, res in zip(owners, results):
+            if isinstance(res, ValueError):
+                raise res
+            for decision, items, acts, secs in res:
+                answers += [(w["key"], a) for (w, _), a in zip(items, acts)]
+                st = self.workflow_stats.setdefault(owner, {"cases": 0, "batches": 0, "seconds": 0.0, "actions": {}})
+                st["cases"] += len(items)
+                st["batches"] += 1
+                st["seconds"] += secs
+                for a in acts:
+                    st["actions"][f"{decision}:{a}"] = st["actions"].get(f"{decision}:{a}", 0) + 1
         asked = 0
         for owner, items in by_owner.items():
             client = self.broker.client(owner)
@@ -638,7 +656,8 @@ class Game:
                     if line.strip():
                         cached_ = json.loads(line).get("cached")
                         paid, cached = paid + (not cached_), cached + bool(cached_)
-            out[p.name] = {"workflow": self.workflow_stats.get(p.name), "grayson_calls": paid,
+            wf = self.workflow_stats.get(p.name)
+            out[p.name] = {"workflow": wf and wf | {"seconds": round(wf["seconds"], 1)}, "grayson_calls": paid,
                            "grayson_cached": cached}
         return out
 
