@@ -61,7 +61,9 @@ def _player_runner(spec: str, a, user: str):
     if kind == "claude-code" and os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
         env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
     if kind == "codex":
-        env["CODEX_HOME"] = a.codex_home
+        # One Unix user and one login for every Codex player (sandbox/setup-box.sh).
+        user = "arena-codex"
+        env["CODEX_HOME"] = "/home/arena-codex/.codex"
     if os.environ.get("GRAYSON_API_KEY"):
         env["GRAYSON_API_KEY"] = os.environ["GRAYSON_API_KEY"]
     return RUNNERS[kind](model, extra_env=env, as_user=user, proxy=a.proxy, timeout_s=a.session_timeout)
