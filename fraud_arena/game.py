@@ -118,6 +118,8 @@ class Game:
         self.good_wf_snap: dict[str, Path | None] = {}
         self.workflow_stats: dict[str, dict] = {}
         self.queue_stats: dict[str, dict] = {}
+        import threading
+        self._text_lock = threading.Lock()
         self.queue_grayson: dict[str, tuple[str, dict]] = {}  # defender -> (institution, grayson config)
         self.textgen = textgen if textgen is not None else _textgen(cfg, Path(out))
         self.briefs: dict[int, dict[str, str]] = {}  # ring -> scheme -> its attacker's latest brief
@@ -268,13 +270,29 @@ class Game:
                 self._write_live(run)
 
     def _write_live(self, run) -> None:
-        """Defenders with a deployed workflow get their tables as of each day's end in `live/` (no free text)."""
-        for owner in self.workflows:
+        """Defenders with a deployed workflow get their tables (and the public data) as of each day's end in `live/`,
+        with the rich text rewritten as at a boundary (rows written before come from the cache)."""
+        owners = list(self.workflows)
+        if not owners:
+            return
+        if self.textgen is not None and self.cfg.attacker_text:
+            self._row_causes(run, None)
+
+        def one(owner):
             p = next(p for p in self.players if p.name == owner)
+            ecfg = self.cfg.for_institution(p.target)
+            rewrite = None
+            if self.textgen is not None:
+                def rewrite(folder, inst=p.target, name=p.name):
+                    stats = self.textgen.rewrite(folder, inst, causes=self.text_causes, briefs=self.briefs)
+                    with self._text_lock:
+                        self._count_text(stats)
             try:
-                self.engine.write_live(run, self.cfg.for_institution(p.target), self.workspace(p) / "live")
+                self.engine.write_live(run, ecfg, self.workspace(p) / "live", rewrite=rewrite)
             except Exception as e:
                 self.log({"event": "live_tables_failed", "player": owner, "error": str(e)[:200]})
+        with ThreadPoolExecutor(len(owners)) as pool:
+            list(pool.map(one, owners))
 
     def _answer_outside(self, run, d: int) -> int:
         waiting = run.pending_external()
@@ -629,7 +647,17 @@ class Game:
                             del self.deployed[role]
                     self._set_workflow(p.name, snap)
                     if snap is not None:
-                        self.engine.write_live(game, ecfg, self.workspace(p) / "live")
+                        live = self.last_tables.get(p.name)
+                        dest = self.workspace(p) / "live"
+                        if live is not None and Path(live).exists():
+                            # At the boundary, live/ is the boundary's own (already rewritten) tables.
+                            tmp = dest.with_name("live.tmp")
+                            shutil.rmtree(tmp, ignore_errors=True)
+                            shutil.copytree(live, tmp)
+                            shutil.rmtree(dest, ignore_errors=True)
+                            tmp.rename(dest)
+                        else:
+                            self.engine.write_live(game, ecfg, dest)
                     keep = self.out / "bundles" / f"{p.name}-{b}-{digest[:12]}.json"
                     keep.parent.mkdir(parents=True, exist_ok=True)
                     keep.write_text(json.dumps({"policy": bun.policy, "notes": bun.notes,
@@ -758,7 +786,7 @@ class Game:
         bounds = self.cfg.boundaries()
         write = getattr(self.engine, "write_truth", None)
         self.text_causes = None
-        if write is None or not (self.cfg.attacker_text or b == bounds[-2]):
+        if write is None or not (self.cfg.attacker_text or (b is not None and b == bounds[-2])):
             return
         from .textgen import RowCauses
 

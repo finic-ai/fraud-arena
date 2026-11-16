@@ -160,22 +160,22 @@ class RunmereEngine:
             out.append((col, path, "upper" in (src.get("transforms") or [])))
         return out
 
-    def write_live(self, run, cfg, dest: Path) -> None:
-        """The institution's tables as of now, for a deployed workflow to read mid-period (`live/` in the workspace),
-        without their free-text columns: those are rewritten (model-written text) only at period boundaries, so the
-        raw world text never reaches a player."""
+    def write_live(self, run, cfg, dest: Path, rewrite=None) -> None:
+        """The institution's tables as of now, and the public data under `public/`, for a deployed workflow to read
+        mid-period (`live/` in the workspace). `rewrite(folder)` gives the rich text its model-written form before the
+        folder is swapped in, as at a boundary; without it (the world's template text) the boundary tables' policy
+        holds: rich text as the world wrote it."""
         tmp = dest.with_name(dest.name + ".tmp")
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True)
         run.write_observer(cfg.observer, str(tmp))
-        text = self.text_columns(cfg)
-        for f in tmp.glob("*.parquet"):
-            drop = text.get(f.stem) or set()
-            if drop:
-                t = pq.read_table(f)
-                keep = [c for c in t.column_names if c not in drop]
-                if len(keep) != len(t.column_names):
-                    pq.write_table(t.select(keep), f)
+        try:
+            (tmp / "public").mkdir()
+            run.write_observer(self.PUBLIC_OBSERVER, str(tmp / "public"))
+        except Exception:  # a world without a public observer
+            pass
+        if rewrite is not None:
+            rewrite(tmp)
         for p in [tmp, *tmp.rglob("*")]:
             os.chmod(p, 0o755 if p.is_dir() else 0o644)
         old = dest.with_name(dest.name + ".old")

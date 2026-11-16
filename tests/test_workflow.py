@@ -309,3 +309,26 @@ def test_queue_columns_show_what_the_observer_shows(tmp_path):
     cols = eng.queue_columns(cfg)
     assert {c for c, _, _ in cols} == {"CASE_NO", "CASE_TYPE", "ACCT_NO"}  # no display ids, nothing hidden
     assert dict((c, u) for c, _, u in cols)["CASE_TYPE"] is True
+
+
+def test_live_tables_get_the_text_rewrite_and_public_data(tmp_path):
+    class Run_:
+        day = 181.0
+        def write_observer(self, obs, d):
+            (Path(d) / f"{obs}.parquet").write_text("x")
+
+    class TG:
+        calls = []
+        def rewrite(self, folder, inst, causes=None, briefs=None):
+            TG.calls.append((Path(folder).name, inst, sorted(p.name for p in Path(folder).rglob("*.parquet"))))
+            return {"institution": inst, "tables": {}}
+
+    from fraud_arena.engine import RunmereEngine
+    eng = RunmereEngine.__new__(RunmereEngine)
+    eng.PUBLIC_OBSERVER = "public"
+    from fraud_arena.config import EpisodeConfig
+    cfg = EpisodeConfig(world=Path("w"), institution="kellmont", seed=1)
+    dest = tmp_path / "ws" / "live"
+    eng.write_live(Run_(), cfg, dest, rewrite=lambda f: TG().rewrite(f, "kellmont"))
+    assert TG.calls == [("live.tmp", "kellmont", ["kellmont.parquet", "public.parquet"])]  # rewritten before swap
+    assert (dest / "public" / "public.parquet").exists() and not (tmp_path / "ws" / "live.tmp").exists()
