@@ -26,6 +26,8 @@ class ScoreWeights:
     alert: float = 8.0
     block: float = 25.0
     close_account: float = 200.0
+    # Per dollar of mule pass-through prevented, against 1.0 for a dollar of loss: a stated default, not the owner's.
+    mule_flow: float = 0.10
     displacement_in_composite: bool = False
 
     def action_cost(self, action: str, amount: float) -> float:

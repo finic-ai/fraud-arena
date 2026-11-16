@@ -134,7 +134,8 @@ def test_scoring_counts_victim_losses_not_laundering_and_prices_friction(tmp_pat
                         end="2026-08-01T00:00:00Z", weights=w)
     assert cand.adverse_on_good == 1 and cand.friction == w.decline_fixed
     p = paired(cand, ref, w)
-    assert p.losses_prevented == 60.0 and p.composite == 60.0 - w.decline_fixed
+    assert p.losses_prevented == 60.0 and p.mule_flow_prevented == 60.0
+    assert p.composite == 60.0 + w.mule_flow * 60.0 - w.decline_fixed
 
 
 # --- queue ---
@@ -267,3 +268,4 @@ def test_pass_through_mules_are_not_losses_even_unlabelled(tmp_path):
     d = window_score(t, tmp_path / "owners.parquet", institution="dovrex", **kw)
     assert b.losses == 100.0 and b.losses_by_scenario == {"romance_scam": 100.0}
     assert d.losses == 0.0 and b.displacement == 0.0
+    assert d.mule_flow == 95.0 and b.mule_flow == 0.0
