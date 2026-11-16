@@ -123,7 +123,7 @@ class Asking(Run):
             if self.ran.get(self.day + 1) is None and "outside" in dep:
                 self.ran[self.day + 1] = True
                 self.waiting = [{"key": f"k{self.day + 1}-{a}", "decision": "brind_card_auth", "gate": "event",
-                                 "needs": ["scam"], "time": 0, "features": {"amount": a, "note": "raw"},
+                                 "needs": ["scam"], "time": 0, "features": {"amount": a, "note": "rent", "statement": "raw template"},
                                  "identifiers": {"CARD_AUTHS.CUST_ID": "c1"}, "actions": ["approve", "decline"],
                                  "default_action": "approve"} for a in (500, 900)]
                 return len(self.waiting)
@@ -172,9 +172,9 @@ def test_the_game_answers_integration_features_with_grayson(tmp_path, monkeypatc
     res = game.run()
     dep = game.deployed["brind_defender"]
     assert dep["outside"] == {"scam": {"options": ["yes", "no"]}} and dep["external"] == {"brind_card_auth": {}}
-    assert len(g.reqs) == 4 and all(r["data"]["case"] == {"amount": r["data"]["case"]["amount"],
-                                                          "CARD_AUTHS.CUST_ID": "c1"} for r in g.reqs)
-    assert all("note" not in r["data"]["case"] for r in g.reqs)  # raw world text never reaches Grayson
+    assert len(g.reqs) == 4 and all(r["data"]["case"]["CARD_AUTHS.CUST_ID"] == "c1" for r in g.reqs)
+    assert all("statement" not in r["data"]["case"] for r in g.reqs)  # rich text only once model-written
+    assert all(r["data"]["case"]["note"] == "rent" for r in g.reqs)  # routine text, as the tables show it
     assert res["decisioning"]["defender-brindlemark"]["integrations"]["grayson"] == 4
     log = (tmp_path / "out" / "grayson-live" / "defender-brindlemark.jsonl").read_text().splitlines()
     assert len(log) == 4 and json.loads(log[0])["integration"] == "scam"

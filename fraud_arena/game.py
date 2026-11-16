@@ -493,6 +493,13 @@ class Game:
             st["defaulted"] += len(defaulted)
         return len(answers)
 
+    # Case features holding text the harness rewrites with a model before players see it (textgen RICH columns:
+    # applications' free text, claim statements, return comments, beneficiary-change notes). In a waiting case they
+    # are still the world's template text, which gives fraud away, so outside code doesn't get them; short routine
+    # text (P2P and wire notes, names, labels) is shown as the tables show it.
+    RICH_CASE_TEXT = frozenset({"occupation", "employer", "source_of_funds", "account_purpose", "statement", "comment",
+                                "beneficiary_change_note"})
+
     def _feature_kinds(self) -> dict[str, dict[str, str]]:
         if self._kinds is None:
             self._kinds = {}
@@ -507,9 +514,7 @@ class Game:
     def _case_view(self, w: dict) -> dict:
         """What outside code shows a decision model about a case: its features, without free text (the world's text
         reaches players only in its model-written form), plus its display identifiers."""
-        kinds = self._feature_kinds().get(w["decision"], {})
-        feats = {k: v for k, v in (w.get("features") or {}).items()
-                 if not any(t in kinds.get(k, "") for t in ("str", "text"))}
+        feats = {k: v for k, v in (w.get("features") or {}).items() if k not in self.RICH_CASE_TEXT}
         return feats | {k: v for k, v in (w.get("identifiers") or {}).items() if v is not None}
 
     def _answer_features(self, cases: list[dict]) -> dict[str, dict]:
