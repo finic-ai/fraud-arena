@@ -88,6 +88,10 @@ class Game:
         self.cfg, self.engine, self.players = cfg, engine, list(players)
         self.attacker_runners, self.max_attackers = attacker_runners, max_attackers
         self.ring_ids: dict[int, str] = {}
+        self.deployed: dict[str, dict] = {}  # role -> deployment in force in the game run
+        self.good: dict[str, dict] = {}  # role -> last deployment that ran through a period
+        self.role_of_decision: dict[str, str] = {}
+        self.owner_of_role: dict[str, str] = {}
         self.out, self.sandbox = Path(out), Path(sandbox)
         self.attacker = attacker_api
         self.log = log
@@ -128,17 +132,46 @@ class Game:
             for t in turns:
                 self.log({"event": "turn", **asdict(t)})
             t0 = time.monotonic()
-            game.run_until_day(nxt)
+            game = self._advance(game, nxt)
             ref.run_until_day(nxt)
             self.log({"event": "advanced", "day": nxt, "seconds": round(time.monotonic() - t0, 1)})
             self._write_progress()
         if cfg.settle_days:
             end = bounds[-1] + cfg.settle_days
             t0 = time.monotonic()
-            game.run_until_day(end)
+            game = self._advance(game, end)
             ref.run_until_day(end)
             self.log({"event": "settled", "day": end, "seconds": round(time.monotonic() - t0, 1)})
         return self._score(game, ref)
+
+    def _advance(self, game, day: int):
+        """Advances a fork of the game run, so that a deployed rule that fails at run time (say, a missing feature
+        compared with a number) can't end the game: the run goes back to the boundary, that role returns to its last
+        bundle that ran (or its built-in policy), the defender hears why next period, and the period runs again."""
+        for _ in range(len(self.deployed) + 2):
+            trial = game.fork()
+            try:
+                trial.run_until_day(day)
+            except ValueError as e:
+                decision = str(e).split(":", 1)[0].strip()
+                role = self.role_of_decision.get(decision)
+                if role is None or role not in self.deployed:
+                    raise
+                good = self.good.get(role)
+                if good is not None:
+                    game.deploy(role, good)
+                    self.deployed[role] = good
+                else:
+                    game.undeploy(role)
+                    del self.deployed[role]
+                owner = self.owner_of_role[role]
+                msg = f"your bundle failed at run time and was taken back ({'previous bundle' if good is not None else 'built-in rules'} in force): {e}"
+                self.state[owner].last_error = msg
+                self.log({"event": "bundle_failed", "player": owner, "role": role, "error": str(e)[:300]})
+                continue
+            self.good.update(self.deployed)
+            return trial
+        raise RuntimeError(f"the game run can't advance to day {day}")
 
     def _period(self, game, b: int, first: bool) -> list[Turn]:
         jobs = [(p, self._prepare(game, p, b, first)) for p in self.players]
@@ -199,11 +232,15 @@ class Game:
                 if bun.digest != st.last_deploy:
                     role_of = self.engine.role_of(ecfg)
                     parts = bundles.split_by_role(bun.policy, role_of)
+                    self.role_of_decision.update(role_of)
                     for role in [r for r in ecfg.roles if r in set(role_of.values())]:
+                        self.owner_of_role[role] = p.name
                         if role in parts:
                             game.deploy(role, parts[role])
-                        elif hasattr(game, "deployed") and game.deployed(role):
+                            self.deployed[role] = parts[role]
+                        elif role in self.deployed:
                             game.undeploy(role)
+                            del self.deployed[role]
                     keep = self.out / "bundles" / f"{p.name}-{b}-{bun.digest[:12]}.json"
                     keep.parent.mkdir(parents=True, exist_ok=True)
                     keep.write_text(json.dumps({"policy": bun.policy, "notes": bun.notes}, default=str))

@@ -84,3 +84,31 @@ def test_game_runs_defenders_and_attackers_together(tmp_path):
     a = res["attackers"]["attacker-r7"]
     assert a["stolen"] == 80.0 and a["stolen_by_scripted_ring"] == 50.0 and a["vs_scripted"] == 30.0
     assert res["tokens"]["attacker-r7"]["output_tokens"] == 4
+
+
+def test_a_bundle_that_fails_at_run_time_is_taken_back(tmp_path):
+    class Flaky(Run):
+        def run_until_day(self, d):
+            if "brind_defender" in self.deployed and "bad" in str(self.deployed["brind_defender"]):
+                raise ValueError("brind_card_auth: rule: can't order Null and Float(0.6)")
+            self.day = d
+        def fork(self): return Flaky(self.day, self.deployed, self.plans)
+        def undeploy(self, role): self.deployed.pop(role, None)
+
+    class E(Engine):
+        def start(self, cfg): return Flaky()
+
+    n = {"i": 0}
+    def bundle(ws):
+        (ws / "bundle").mkdir(parents=True, exist_ok=True)
+        n["i"] += 1
+        when = "obs.bad > 0.6" if n["i"] == 1 else "obs.amount > 900"
+        (ws / "bundle" / "policy.yaml").write_text(f"rules: [{{decision: brind_card_auth, when: '{when}', action: decline}}]\n")
+
+    events = []
+    cfg = GameConfig(world=Path("w.yaml"), seed=1, start_day=180, period_days=10, horizon_days=20, settle_days=0)
+    d = Player("defender-brindlemark", "defender", "brindlemark", Scripted("claude-code", bundle))
+    g = Game(cfg, E(), [d], tmp_path / "out", tmp_path / "sb", attacker_api=Attackers(), log=events.append)
+    res = g.run()
+    assert any(e.get("event") == "bundle_failed" for e in events)
+    assert "taken back" in (g.state["defender-brindlemark"].last_error or "") or res["turns"][1]["applied"]
