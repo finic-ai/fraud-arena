@@ -56,7 +56,26 @@ iptables -C OUTPUT -m owner --uid-owner "$U" -j REJECT 2>/dev/null || iptables -
 ip6tables -C OUTPUT -m owner --uid-owner "$U" -o lo -j ACCEPT 2>/dev/null || ip6tables -A OUTPUT -m owner --uid-owner "$U" -o lo -j ACCEPT
 ip6tables -C OUTPUT -m owner --uid-owner "$U" -j REJECT 2>/dev/null || ip6tables -A OUTPUT -m owner --uid-owner "$U" -j REJECT
 
-# The harness user may start sessions as `agent` without a password, and nothing else.
-echo "ubuntu ALL=(agent) NOPASSWD: /usr/bin/env" > /etc/sudoers.d/fraud-arena && chmod 440 /etc/sudoers.d/fraud-arena
+# One user per game player (arena-p1..arena-p12), each with its own home and workspace, the same network rules.
+# Codex players share one Codex home that holds only the ChatGPT login (copies would invalidate each other on token
+# refresh); sessions run --ephemeral, so no transcripts land there.
+getent group arena-codex >/dev/null || groupadd arena-codex
+install -d -o root -g arena-codex -m 2770 /srv/codex-home
+cp /home/agent/.codex/auth.json /srv/codex-home/auth.json && chgrp arena-codex /srv/codex-home/auth.json && chmod 660 /srv/codex-home/auth.json
+for n in $(seq 1 12); do
+  u=arena-p$n
+  id $u >/dev/null 2>&1 || useradd --create-home --shell /bin/bash $u
+  usermod -aG arena,arena-codex $u
+  grep -q 'umask 002' /home/$u/.profile 2>/dev/null || echo 'umask 002' >> /home/$u/.profile
+  uid=$(id -u $u)
+  for t in iptables ip6tables; do
+    $t -C OUTPUT -m owner --uid-owner $uid -o lo -j ACCEPT 2>/dev/null || $t -A OUTPUT -m owner --uid-owner $uid -o lo -j ACCEPT
+    $t -C OUTPUT -m owner --uid-owner $uid -j REJECT 2>/dev/null || $t -A OUTPUT -m owner --uid-owner $uid -j REJECT
+  done
+done
+
+# The harness user may start sessions as the players without a password, and nothing else.
+{ echo "Runas_Alias ARENA = agent, $(seq -s, -f 'arena-p%g' 1 12)"; echo "ubuntu ALL=(ARENA) NOPASSWD: /usr/bin/env"; } > /etc/sudoers.d/fraud-arena
+chmod 440 /etc/sudoers.d/fraud-arena && visudo -cf /etc/sudoers.d/fraud-arena >/dev/null
 
 echo "sandbox ready: agent uid $U, proxy http://127.0.0.1:3128"

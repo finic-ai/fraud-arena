@@ -79,17 +79,24 @@ class RunmereEngine:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    @contextmanager
-    def tool_server(self, run, cfg):
-        """The institution's tables as of now, in a folder the agent's user can read, served over stdio."""
-        data = self._agent_dir(cfg, f"data-day{int(run.day)}")
+    def _tables_dir(self, run, cfg, tag: str | None) -> Path:
+        return self._agent_dir(cfg, f"{tag + '-' if tag else ''}data-day{int(run.day)}")
+
+    def write_tables(self, run, cfg, tag: str | None = None) -> Path:
+        """The institution's tables as of now, once per boundary, where the player's user can read them."""
+        data = self._tables_dir(run, cfg, tag)
         if not any(data.iterdir()):
             run.write_observer(cfg.observer, str(data))
-        meta = self._agent_dir(cfg, "meta")
+        return data
+
+    @contextmanager
+    def tool_server(self, run, cfg, *, workspace: Path | None = None, tag: str | None = None):
+        data = self.write_tables(run, cfg, tag)
+        meta = self._agent_dir(cfg, f"{tag + '-' if tag else ''}meta")
         (meta / "decisions.json").write_text(json.dumps(self.decision_points(cfg), indent=2, default=str))
         fmt = meta / "deploy-format.md"
         fmt.write_text(resources.files("fraud_arena").joinpath("briefs/deploy-format.md").read_text())
-        ws = self.sandbox_root / f"{cfg.institution}-s{cfg.seed}" / "workspace"
+        ws = workspace or self.sandbox_root / f"{cfg.institution}-s{cfg.seed}" / "workspace"
         yield McpServer("arena", command=self.python, args=(
             "-m", "fraud_arena.toolserver", "--data", str(data), "--decisions", str(meta / "decisions.json"),
             "--workspace", str(ws), "--format", str(fmt)))

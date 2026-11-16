@@ -148,7 +148,7 @@ class CodexRunner(AgentRunner):
 
     def command(self, workspace, servers, prompt):
         argv = ["codex", "exec", "--json", "-m", self.model, "-C", str(workspace), "--skip-git-repo-check",
-                "--dangerously-bypass-approvals-and-sandbox", "--ignore-user-config"]
+                "--dangerously-bypass-approvals-and-sandbox", "--ignore-user-config", "--ephemeral"]
         for s in servers:
             key = f"mcp_servers.{s.name}"
             if s.url:
