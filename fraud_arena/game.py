@@ -71,6 +71,10 @@ class GameConfig:
     settle_days: int = 30
     # The defender works its institution's review queue and acts on accounts (Fraud World's manual review).
     manual_review: bool = True
+    # Rewrites the defenders' rich text cells with a generator (fraud_arena.textgen): claude-code:<model>,
+    # codex:<model>, or None for the world's own template text.
+    text_generator: str | None = None
+    text_cache: Path | None = None
 
     def boundaries(self):
         end = self.start_day + self.horizon_days
@@ -85,7 +89,7 @@ class GameConfig:
 
 class Game:
     def __init__(self, cfg: GameConfig, engine, players: list[Player], out: Path, sandbox: Path, *, attacker_api,
-                 attacker_runners=None, max_attackers: int = 4, log=print):
+                 attacker_runners=None, max_attackers: int = 4, log=print, textgen=None):
         """`attacker_runners(i, ring)` makes the runner of the i-th attacker; attackers are chosen after the warm-up,
         one per ring among the `max_attackers` most active ones."""
         self.cfg, self.engine, self.players = cfg, engine, list(players)
@@ -96,6 +100,7 @@ class Game:
         self.role_of_decision: dict[str, str] = {}
         self.owner_of_role: dict[str, str] = {}
         self.last_tables: dict[str, Path] = {}
+        self.textgen = textgen if textgen is not None else _textgen(cfg, Path(out))
         from .review import Reviewer
         self.reviewer = Reviewer()
         self.review_on: set[str] = set()
@@ -206,6 +211,9 @@ class Game:
             ecfg = cfg.for_institution(p.target)
             st = self.state[p.name]
             data = self.engine.write_tables(game, ecfg, tag=p.name)
+            if self.textgen is not None and data is not None:
+                stats = self.textgen.rewrite(data, p.target)
+                self.log({"event": "textgen", "player": p.name, "boundary": b, **stats})
             since = max(cfg.start_day, b - cfg.period_days)
             outcomes = self.engine.own_outcomes(game, ecfg, since, b)
             outcomes["fraud_signals"] = self.engine.fraud_signals(data, self.last_tables.get(p.name), ecfg, b)
@@ -364,6 +372,15 @@ class Game:
         tmp.write_text(json.dumps(result, indent=2, default=str))
         tmp.rename(self.out / "result.json")
         return result
+
+
+def _textgen(cfg: GameConfig, out: Path):
+    from .textgen import TextGen, make_generator
+
+    gen = make_generator(cfg.text_generator, workdir=out / "textgen-work")
+    if gen is None:
+        return None
+    return TextGen(gen, cfg.text_cache or out / "textgen-cache", seed=cfg.seed, world=cfg.world)
 
 
 def ring_take(truth: Path, ring: str, start: str, end: str) -> float:

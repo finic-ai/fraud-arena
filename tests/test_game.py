@@ -121,3 +121,33 @@ def test_a_bundle_that_fails_at_run_time_is_taken_back(tmp_path):
     res = g.run()
     assert any(e.get("event") == "bundle_failed" for e in events)
     assert "taken back" in (g.state["defender-brindlemark"].last_error or "") or res["turns"][1]["applied"]
+
+
+def test_defender_tables_are_rewritten_before_the_tool_server_starts(tmp_path):
+    seen = []
+
+    class E(Engine):
+        def write_tables(self, run, cfg, tag=None):
+            d = tmp_path / f"{tag}-day{run.day}"
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+
+        @contextmanager
+        def tool_server(self, run, cfg, workspace=None, tag=None):
+            seen.append(("server", tag))
+            yield McpServer("arena", url="http://x/mcp")
+
+    class TG:
+        def rewrite(self, data, institution):
+            seen.append(("rewrite", institution, data.name))
+            return {"tables": {"CALLS": {"rows": 1}}, "seconds": 0.0, "tokens": {}}
+
+    logs = []
+    cfg = GameConfig(world=Path("w.yaml"), seed=1, start_day=180, period_days=10, horizon_days=10,
+                     text_generator="fake:1")
+    d = Player("defender-brindlemark", "defender", "brindlemark", Scripted("claude-code", lambda ws: None))
+    Game(cfg, E(), [d], tmp_path / "out", tmp_path / "sb", attacker_api=Attackers(), log=logs.append,
+         textgen=TG()).run()
+    assert seen[:2] == [("rewrite", "brindlemark", "defender-brindlemark-day180"), ("server", "defender-brindlemark")]
+    rec = next(r for r in logs if r.get("event") == "textgen")
+    assert rec["boundary"] == 180 and rec["tables"]["CALLS"]["rows"] == 1
