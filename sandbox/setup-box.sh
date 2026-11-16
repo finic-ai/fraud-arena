@@ -61,7 +61,7 @@ ip6tables -C OUTPUT -m owner --uid-owner "$U" -j REJECT 2>/dev/null || ip6tables
 # login home can't be shared across users (Codex writes its files private). Codex players of a game are then one
 # team that can see each other's workspaces (fine within a side; self-play needs a second login).
 for u in $(seq -f 'arena-p%g' 1 12) arena-codex; do
-  id $u >/dev/null 2>&1 || useradd --create-home --shell /bin/bash $u
+  id $u >/dev/null 2>&1 || useradd --create-home --shell /bin/bash $(getent group $u >/dev/null && echo -g $u) $u
   usermod -aG arena $u
   grep -q 'umask 002' /home/$u/.profile 2>/dev/null || echo 'umask 002' >> /home/$u/.profile
   uid=$(id -u $u)
