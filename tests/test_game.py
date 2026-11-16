@@ -57,7 +57,9 @@ class Attackers:
     def menu(self, ring): return {"type": "object"}
     def brief(self, **k): return "plan"
     def apply_plan(self, run, ring, plan): run.plans[ring] = plan
-    def ring_loss(self, run, ring): return 80.0 if run.plans else (50.0 if run.day > 180 else 0.0)
+    def ring_loss(self, run, ring):
+        o = 80.0 if run.plans else (50.0 if run.day > 180 else 0.0)
+        return {"observed": o, "background": 1000.0 if run.day > 180 else 0.0}
 
 
 class Scripted:
@@ -84,6 +86,7 @@ def test_game_runs_defenders_and_attackers_together(tmp_path):
     assert res["defenders"]["defender-brindlemark"]["losses_prevented"] == 60.0
     a = res["attackers"]["attacker-r7"]
     assert a["stolen"] == 80.0 and a["stolen_by_scripted_ring"] == 50.0 and a["vs_scripted"] == 30.0
+    assert a["background_stolen"] == 1000.0
     assert res["tokens"]["attacker-r7"]["output_tokens"] == 4
 
 

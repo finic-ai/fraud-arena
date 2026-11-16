@@ -300,11 +300,16 @@ class Game:
                                  weights=cfg.weights)
                 result["defenders"][p.name] = paired(g, r, cfg.weights).as_dict() | {"institution": p.target}
             else:
-                base = self.ring_loss_at_start.get(p.target, 0.0)
-                g = self.attacker.ring_loss(game, p.target) - base
-                r = self.attacker.ring_loss(ref, p.target) - base
-                result["attackers"][p.name] = {"ring": p.target, "stolen": g, "stolen_by_scripted_ring": r,
-                                               "vs_scripted": g - r}
+                base = self.ring_loss_at_start.get(p.target, {"observed": 0.0, "background": 0.0})
+                gl, rl = self.attacker.ring_loss(game, p.target), self.attacker.ring_loss(ref, p.target)
+                g = {k: gl[k] - base[k] for k in gl}
+                r = {k: rl[k] - base[k] for k in rl}
+                # Scored on the observed institutions only, where defenders play; background is displacement.
+                result["attackers"][p.name] = {"ring": p.target, "stolen": g["observed"],
+                                               "stolen_by_scripted_ring": r["observed"],
+                                               "vs_scripted": g["observed"] - r["observed"],
+                                               "background_stolen": g["background"],
+                                               "background_by_scripted_ring": r["background"]}
         tokens = {}
         for t in self.turns:
             tokens.setdefault(t.player, {})

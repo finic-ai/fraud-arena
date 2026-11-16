@@ -88,7 +88,15 @@ class Attackers:
             raise ValueError("; ".join(errors[:10]))
         return menus.apply_plan(run, ring, self.cap(plan), world=self.world)
 
-    def ring_loss(self, run, ring: int) -> float:
-        """What the ring has taken so far, by the world's own account: the losses of its incidents (grader side)."""
-        rows = run.rows("incident", ["loss"], where_attr="ring", equals=self.entity(run, ring))
-        return float(sum((r.get("loss") or 0) for r in rows))
+    def ring_loss(self, run, ring: int) -> dict[str, float]:
+        """What the ring has taken so far, by the world's own account (its incidents' losses, grader side), split into
+        the observed institutions where defenders play (what the attacker is scored on) and the background ones
+        (reported as displacement, never scored)."""
+        from ..config import INSTITUTIONS
+        names = {r["id"]: r["name"] for r in run.rows("institution", ["name"])}
+        rows = run.rows("incident", ["loss", "institution"], where_attr="ring", equals=self.entity(run, ring))
+        out = {"observed": 0.0, "background": 0.0}
+        for r in rows:
+            name = names.get(r.get("institution"), r.get("institution"))
+            out["observed" if name in INSTITUTIONS else "background"] += float(r.get("loss") or 0)
+        return out
