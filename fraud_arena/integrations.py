@@ -52,6 +52,11 @@ class Integration:
     instructions: str = ""
     criteria: dict[str, str] = field(default_factory=dict)
     data: list[str] = field(default_factory=list)
+    table: str | None = None
+    where: dict = field(default_factory=dict)
+    columns: list[str] | None = None
+    limit: int | None = None
+    newest_first: bool = False
 
     @property
     def options(self) -> list[str]:
@@ -80,13 +85,26 @@ def parse(policy: dict) -> dict[str, Integration]:
                                     criteria={str(k): str(v) for k, v in crit.items()}, data=data)
         else:
             sql = spec.get("sql")
-            if not isinstance(sql, str) or not sql.strip().lower().startswith(("select", "with")):
+            table = spec.get("table")
+            if table is None and sql is None:
+                raise IntegrationError(f"integration `{name}`: give a `table` (live lookup) or `sql`")
+            if sql is not None and (not isinstance(sql, str) or
+                                    not sql.strip().lower().startswith(("select", "with"))):
                 raise IntegrationError(f"integration `{name}`: sql must be one SELECT query")
             params = {str(k): str(v) for k, v in (spec.get("params") or {}).items()}
-            for p in PARAM.findall(sql):
+            where = spec.get("where") or {}
+            if not isinstance(where, dict):
+                raise IntegrationError(f"integration `{name}`: where maps a column to a value, a list or bounds")
+            refs = PARAM.findall(sql or "") + PARAM.findall(json.dumps(where))
+            for p in refs:
                 if p != "now" and p not in params:
                     raise IntegrationError(f"integration `{name}`: ${p} has no entry in params")
-            out[name] = Integration(name, src, sql=sql, params=params, default=spec.get("default"))
+            lim = spec.get("limit")
+            out[name] = Integration(name, src, sql=sql, params=params, default=spec.get("default"),
+                                    table=str(table) if table else None, where=where,
+                                    columns=[str(c) for c in spec["columns"]] if spec.get("columns") else None,
+                                    limit=min(int(lim), 1000) if lim else MAX_ROWS,
+                                    newest_first=bool(spec.get("newest_first", False)))
     for i in out.values():
         for d in i.data:
             if d != "case" and d not in out:
@@ -188,11 +206,55 @@ def _scalar(v):
         return None
 
 
+AGO = re.compile(r"^\$now\s*-\s*(\d+)\s*([dhm])$")
+
+
+def _bind(v, values: dict, now):
+    """A `where` value with its parameters: `$p`, `$now`, `$now - 90d` (days, hours or minutes)."""
+    from datetime import timedelta
+    if isinstance(v, dict):
+        return {op: _bind(x, values, now) for op, x in v.items()}
+    if isinstance(v, list):
+        return [_bind(x, values, now) for x in v]
+    if isinstance(v, str):
+        m = AGO.match(v.strip())
+        if m:
+            n, unit = int(m.group(1)), m.group(2)
+            return now - timedelta(**{{"d": "days", "h": "hours", "m": "minutes"}[unit]: n}) if now else None
+        if v.strip() == "$now":
+            return now
+        if v.startswith("$") and v[1:] in values:
+            return values[v[1:]]
+    return v
+
+
+def _sql_over(rows, sql: str, values: dict):
+    """Runs `sql` over a lookup's rows (`rows`) in a connection that can read nothing else."""
+    import duckdb
+    db = duckdb.connect()
+    db.register("rows", rows)
+    db.execute("set enable_external_access = false")
+    db.execute("set lock_configuration = true")
+    order = []
+
+    def sub(m):
+        order.append(m.group(1))
+        return "?"
+    cur = db.execute(PARAM.sub(sub, sql), [values.get(p) for p in order])
+    cols = [d[0] for d in cur.description]
+    out = cur.fetchmany(MAX_ROWS)
+    db.close()
+    return cols, out
+
+
 class Resolver:
     """Computes the features waiting cases need, for one defender: lookups per case, Grayson in one batch."""
 
-    def __init__(self, integrations: dict[str, Integration], data: Data, grayson_client, *, case_view=None, log=None):
+    def __init__(self, integrations: dict[str, Integration], data: Data, grayson_client, *, case_view=None, log=None,
+                 observer: str | None = None, public_observer: str = "public"):
         self.integrations = integrations
+        self.observer, self.public_observer = observer, public_observer
+        self.run = None
         self.data = data
         self.client = grayson_client
         self.case_view = case_view or (lambda case: case.get("features") or {})
@@ -204,13 +266,27 @@ class Resolver:
         values["now"] = _iso(case.get("time"))
         self.stats["lookups"] += 1
         try:
+            if i.table is not None:
+                if self.run is None or not hasattr(self.run, "observer_rows"):
+                    raise IntegrationError("live lookups need a run with observer_rows")
+                now = (datetime.fromtimestamp(case["time"] / 1000, tz=timezone.utc).replace(tzinfo=None)
+                       if case.get("time") is not None else None)
+                where = {c: _bind(v, values, now) for c, v in i.where.items()}
+                obs = self.public_observer if i.source == "public" else self.observer
+                rows = self.run.observer_rows(obs, i.table, where=where or None, columns=i.columns,
+                                              limit=i.limit, newest_first=i.newest_first)
+                if i.sql:
+                    return _sql_over(rows, i.sql, values)
+                return rows.column_names, [tuple(r.values()) for r in rows.to_pylist()][:MAX_ROWS]
             return self.data.query(i.sql, values)
         except Exception:
             self.stats["lookup_errors"] += 1
             return None
 
-    def answer(self, cases: list[dict]) -> dict[str, dict]:
+    def answer(self, cases: list[dict], run=None) -> dict[str, dict]:
         """`{case key: {feature: value}}` for every feature each case needs that is one of these integrations."""
+        if run is not None:
+            self.run = run
         out: dict[str, dict] = {}
         rows_cache: dict[tuple[str, str], tuple | None] = {}
 

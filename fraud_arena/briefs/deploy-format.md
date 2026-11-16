@@ -89,11 +89,17 @@ rules and models can use what they return. Declare them in `policy.yaml`:
 
 ```yaml
 integrations:
-  claims_90d:                         # your institution's own records
+  claims_90d:                         # your institution's own records, live: as of the minute the case arrives
+    source: own_data
+    table: CLAIMS
+    where: {CUST_ID: $cust, CLAIM_TS: {">=": "$now - 90d"}}   # a value, a list, or bounds (>=, >, <=, <); $now - 90d/12h/30m
+    params: {cust: P2P.CUST_ID}       # a case identifier (<TABLE>.<COLUMN>) or feature.<name>
+    sql: "select count(*) from rows"  # optional: SQL over the rows found (named `rows`); without it, the first cell
+    default: 0                        # when nothing is found or the lookup fails
+  customer_history:                   # SQL over all your tables as of the end of the previous simulated day
     source: own_data
     sql: "select count(*) from CLAIMS where CUST_ID = $cust and CLAIM_TS > $now - interval 90 day"
-    params: {cust: P2P.CUST_ID}       # a case identifier (<TABLE>.<COLUMN>) or feature.<name>; $now is the case's time
-    default: 0                        # when nothing is found or the lookup fails
+    params: {cust: P2P.CUST_ID}
   payee_site:                         # the public web: your PUBLIC_* tables (ads, domains, websites, block explorer)
     source: public
     sql: "select * from PUBLIC_WEBSITES where DOMAIN = $d"
@@ -117,8 +123,9 @@ rules:
   features (fit your models offline on the same lookups and Grayson answers for past cases).
 - Nothing is asked until a rule or model reaches it: put cheap rules first, and a case decided earlier costs nothing.
   Grayson calls count against your budget; when Grayson can't answer, the options are equal (no information).
-- Lookups read your tables as of the end of the previous simulated day (refreshed daily, as at a boundary, with
-  fraud reports arriving as late as they do), plus the case itself. Up to 50 rows per lookup.
+- A `table` lookup reads the table live, exactly as it stands when the case arrives (fraud reports still arrive as
+  late as they do), filtered on its own columns, in about a tenth of a millisecond: use it for per-case history. A
+  lookup with only `sql` reads all your tables as of the end of the previous simulated day. Up to 50 rows returned.
 - A case's identifiers are the ids its row shows in your tables (e.g. `P2P.CUST_ID`, `P2P.ACCT_ID`); see a pending
   case's `identifiers`. Grayson sees the case's features and identifiers, not its free text until that text is in
   your tables.

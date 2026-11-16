@@ -124,6 +124,7 @@ class Game:
         self._kinds: dict[str, dict[str, str]] | None = None
         self.good_integrations: dict[str, object] = {}
         self._cur_day = 0
+        self._run_now = None
         import threading
         self._text_lock = threading.Lock()
         self.queue_grayson: dict[str, tuple[str, dict]] = {}  # defender -> (institution, grayson config)
@@ -394,6 +395,7 @@ class Game:
             data.load(Path(tables))
         self.integrations[p.name] = integ.Resolver(
             ints, data, self.broker.client(p.name), case_view=self._case_view,
+            observer=self.cfg.for_institution(p.target).observer,
             log=lambda rows, o=p.name: self._log_live(o, float(self._cur_day), rows))
 
     def _answer_outside(self, run, d: int) -> int:
@@ -402,7 +404,7 @@ class Game:
             return 0
         from .bundle import grayson_action
         from .workflow import WorkflowError
-        self._cur_day = d
+        self._cur_day, self._run_now = d, run
         feature_answers = self._answer_features([w for w in waiting if w.get("needs")])
         waiting = [w for w in waiting if not w.get("needs")]
         answers = []
@@ -522,7 +524,7 @@ class Game:
         out: dict[str, dict] = {}
         for owner, cs in by_owner.items():
             res = self.integrations.get(owner)
-            got = res.answer(cs) if res is not None else {}
+            got = res.answer(cs, run=self._run_now) if res is not None else {}
             for c in cs:
                 ans = got.get(c["key"], {})
                 for n in c["needs"]:

@@ -178,3 +178,33 @@ def test_the_game_answers_integration_features_with_grayson(tmp_path, monkeypatc
     assert res["decisioning"]["defender-brindlemark"]["integrations"]["grayson"] == 4
     log = (tmp_path / "out" / "grayson-live" / "defender-brindlemark.jsonl").read_text().splitlines()
     assert len(log) == 4 and json.loads(log[0])["integration"] == "scam"
+
+
+def test_live_lookups_filter_the_observer_rows_at_the_cases_time(tmp_path):
+    from datetime import datetime
+
+    class LiveRun:
+        calls = []
+
+        def observer_rows(self, observer, table, where=None, columns=None, limit=None, newest_first=False):
+            LiveRun.calls.append((observer, table, where, columns, limit, newest_first))
+            return pa.table({"CLAIM_TS": [datetime(2025, 7, 1), datetime(2025, 7, 20)], "AMT": [40.0, 900.0]})
+
+    ints = integ.parse({"integrations": {
+        "recent": {"source": "own_data", "table": "CLAIMS", "params": {"cust": "CLAIMS.CUST_ID", "floor": "feature.floor"},
+                   "where": {"CUST_ID": "$cust", "CLAIM_TS": {">=": "$now - 90d"}}, "newest_first": True,
+                   "sql": "select sum(AMT) from rows where AMT > $floor", "default": 0},
+        "site": {"source": "public", "table": "WEBSITES", "where": {"DOMAIN": "x.example.com"}}}})
+    with pytest.raises(integ.IntegrationError, match="has no entry in params"):
+        integ.parse({"integrations": {"x": {"source": "own_data", "table": "T", "where": {"A": "$b"}}}})
+    r = integ.Resolver(ints, integ.Data(), None, observer="brindlemark")
+    case = {"key": "k", "decision": "d", "needs": ["recent"], "time": 1754006400000,  # 2025-08-01
+            "features": {"floor": 100}, "identifiers": {"CLAIMS.CUST_ID": "BM1"}}
+    assert r.answer([case], run=LiveRun()) == {"k": {"recent": 900.0}}
+    obs, table, where, cols, limit, newest = LiveRun.calls[0]
+    assert (obs, table, newest) == ("brindlemark", "CLAIMS", True) and where["CUST_ID"] == "BM1"
+    assert where["CLAIM_TS"][">="] == datetime(2025, 5, 3)  # 90 days before the case, naive UTC
+    rows = integ._sql_over(pa.table({"a": [1]}), "select count(*) from rows", {})
+    assert rows[1] == [(1,)]
+    with pytest.raises(Exception):
+        integ._sql_over(pa.table({"a": [1]}), "select * from read_csv('/etc/hosts')", {})
