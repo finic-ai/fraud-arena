@@ -111,8 +111,8 @@ def _truth(tmp, victim_loss, decline_good):
     from datetime import datetime, timezone
     when = [datetime(2026, 7, 1, tzinfo=timezone.utc)] * 2
     _write(t / "postings.parquet", {"key": ["e1", "e2"], "time": when, "payer": ["acc_v", "acc_mule"],
-                                    "payee": ["acc_mule", "ext"], "amount": [victim_loss, victim_loss],
-                                    "dirty": [victim_loss, victim_loss], "cause_kind": ["scenario", "scenario"],
+                                    "payee": ["ext", "ext"], "amount": [victim_loss, victim_loss],
+                                    "dirty": [0.0, victim_loss], "cause_kind": ["scenario", "scenario"],
                                     "cause_scenario": ["ato", "ato"]})
     _write(t / "labels.parquet", {"label": ["money_mule"], "subject": ["acc_mule"]})
     _write(t / "events.parquet", {"key": ["e1", "g1"], "cause_kind": ["scenario", "process"]})

@@ -1,8 +1,8 @@
 """Scores of a defender over an episode window, from the truth tables and entity attributes of a run (grader side).
 
-- Losses: money that fraud took out of the institution and its customers: postings with a tainted (`dirty`) amount
-  whose payer is the institution or one of its accounts, plus the institution's own payouts that a scenario caused
-  (refunds, bonuses, credits it can't recover).
+- Losses: money that fraud took out of the institution and its customers: scenario-caused postings paid by the
+  institution or one of its accounts to anything outside it (refunds, bonuses and credits it pays included), except
+  laundering out of mule and ring accounts. Gross: recoveries such as chargebacks aren't netted yet.
 - Friction: the role's adverse actions on good activity (events not caused by a scenario), priced by `ScoreWeights`.
 - Displacement: losses at every other institution, observed or background.
 A candidate is scored against the reference run of the same seed: differences, never raw levels.
@@ -43,16 +43,19 @@ def window_score(truth: Path, accounts_institution: Path, *, institution: str, r
     c.execute(f"create view owners as select entity, institution from '{accounts_institution}'")
     c.execute(f"""create view post as select * from '{T}/postings.parquet'
                   where time >= timestamptz '{start}' and time < timestamptz '{end}'""")
-    # Tainted money leaving a mule's or a ring's own account is laundering, not a loss; a taken-over victim's
-    # account still counts.
+    # A loss is scenario-caused money leaving an institution: paid by the institution itself or by one of its
+    # accounts to anything outside it. Fraud World taints only some flows (`dirty`), so the cause decides, not the
+    # taint. Money leaving a mule's or a ring's own account is laundering, not a loss; money that only passes
+    # through an institution is counted where it left the victim's.
     c.execute(f"""create view launder as select distinct subject from '{T}/labels.parquet'
                   where label in ('ring_account', 'money_mule')""")
     rows = c.execute("""
-        select o.institution, coalesce(p.cause_scenario, ''),
-               sum(case when p.dirty > 0 then p.dirty else p.amount end)::double
-        from post p join owners o on o.entity = p.payer
-        where (p.dirty > 0 and p.payer not in (select subject from launder))
-           or (p.cause_kind = 'scenario' and o.entity = o.institution)
+        select po.institution, coalesce(p.cause_scenario, ''), sum(p.amount)::double
+        from post p join owners po on po.entity = p.payer
+        left join owners pe on pe.entity = p.payee
+        where p.cause_kind = 'scenario' and p.amount > 0
+          and (pe.institution is null or pe.institution <> po.institution)
+          and p.payer not in (select subject from launder)
         group by all""").fetchall()
     own, other, by_scenario = 0.0, 0.0, {}
     for inst, scen, amt in rows:
