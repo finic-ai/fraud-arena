@@ -8,6 +8,12 @@ R=us-west-2
 id agent >/dev/null 2>&1 || useradd --create-home --shell /bin/bash agent
 chmod 750 /home/ubuntu
 install -d -o agent -g agent -m 700 /home/agent/.codex /home/agent/.claude
+# /srv/arena: workspaces and the tables served to agents; shared by the harness (ubuntu) and `agent`. Episode state
+# (checkpoints, scoring exports) stays under /home/ubuntu, which `agent` can't read.
+getent group arena >/dev/null || groupadd arena
+usermod -aG arena agent && usermod -aG arena ubuntu
+install -d -o ubuntu -g arena -m 2770 /srv/arena
+grep -q 'umask 002' /home/agent/.profile 2>/dev/null || echo 'umask 002' >> /home/agent/.profile
 
 # Agent CLIs, system-wide so `agent` can run them.
 command -v codex >/dev/null || npm install -g --silent @openai/codex

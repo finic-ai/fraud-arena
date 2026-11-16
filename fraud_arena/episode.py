@@ -82,9 +82,10 @@ def brief_text(cfg: EpisodeConfig, boundary: int, outcomes: dict, state: Episode
 
 class Episode:
     def __init__(self, cfg: EpisodeConfig, engine: Engine, runner: AgentRunner | None, out: Path, *,
-                 on_period: Callable[[PeriodRecord], None] | None = None):
+                 workspace: Path | None = None, on_period: Callable[[PeriodRecord], None] | None = None):
         self.cfg, self.engine, self.runner, self.out = cfg, engine, runner, Path(out)
-        self.workspace = self.out / "workspace"
+        # The agent's workspace lives outside `out`, which holds the checkpoints and scoring exports it must not read.
+        self.workspace = Path(workspace) if workspace else self.out / "workspace"
         self.on_period = on_period
 
     def _save(self, state: EpisodeState, cand: RunLike, ref: RunLike) -> None:

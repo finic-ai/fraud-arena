@@ -53,10 +53,13 @@ def test_bundle_inlines_models_and_checks_decisions(tmp_path):
     b = tmp_path / "bundle"
     (b / "models").mkdir(parents=True)
     (b / "models" / "m.json").write_text(json.dumps({"kind": "logistic", "weights": [1.0], "intercept": 0}))
-    (b / "policy.yaml").write_text("models: {risk: {file: models/m.json, features: [amount]}}\n"
+    (b / "models" / "t.json").write_text(json.dumps([{"nodeid": 0, "leaf": 0.5}]))
+    (b / "policy.yaml").write_text("models: {risk: {file: models/m.json, features: [amount]},"
+                                   " t: {file: models/t.json, kind: trees, features: [amount]}}\n"
                                    "rules: [{decision: brind_card_auth, when: 'score.risk > 0.9', action: decline}]\n")
     got = bundle.load(b, role="brind_defender", decisions={"brind_card_auth"})
-    assert got.policy["models"]["risk"]["model"]["kind"] == "logistic"
+    assert got.policy["models"]["risk"]["kind"] == "logistic" and got.policy["format"] == 1
+    assert got.policy["models"]["t"]["trees"] == [{"nodeid": 0, "leaf": 0.5}]
     (b / "policy.yaml").write_text("rules: [{decision: dovrex_login_check, action: block}]\n")
     with pytest.raises(bundle.BundleError, match="isn't one of this role's"):
         bundle.load(b, role="brind_defender", decisions={"brind_card_auth"})

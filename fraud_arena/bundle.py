@@ -4,8 +4,9 @@ Layout, in the agent's workspace:
 
     bundle/policy.yaml     a Runmere deployed policy: rules over the decision's observation, optionally reading
                            model scores (the engine checks names, types and hidden data at deploy)
-    bundle/models/*.json   models the policy declares with `file:` (linear, logistic, or a tree ensemble dumped
-                           from XGBoost / LightGBM), inlined here so the engine gets one document
+    bundle/models/*.json   models the policy declares with `file:`: a model's fields (`kind`, `features`, `weights`
+                           or `trees`, ...) or just the trees list; `fa-model` writes them from scikit-learn or
+                           XGBoost. Inlined here so the engine gets one document
     bundle/NOTES.md        optional: what changed and why (kept with the run, never scored)
 
 The harness only checks shape and limits; the engine's deploy is the authority, and its error goes back to the agent
@@ -50,7 +51,8 @@ def load(bundle_dir: Path, *, role: str, decisions: set[str]) -> Bundle:
         raise BundleError("policy.yaml must be a mapping")
     if policy.get("role", role) != role:
         raise BundleError(f"this task deploys into role {role!r}, not {policy.get('role')!r}")
-    policy["role"] = role
+    policy.pop("role", None)
+    policy.setdefault("format", 1)
     rules = policy.get("rules", [])
     if not isinstance(rules, list) or len(rules) > MAX_RULES:
         raise BundleError(f"rules must be a list of at most {MAX_RULES}")
@@ -70,7 +72,8 @@ def load(bundle_dir: Path, *, role: str, decisions: set[str]) -> Bundle:
                 body = json.loads(f.read_text())
             except json.JSONDecodeError as e:
                 raise BundleError(f"model {name}: {m['file']} isn't JSON: {e}") from None
-            models[name] = {k: v for k, v in m.items() if k != "file"} | {"model": body}
+            rest = {k: v for k, v in m.items() if k != "file"}
+            models[name] = rest | ({"trees": body} if isinstance(body, list) else body)
     canon = json.dumps(policy, sort_keys=True, default=str).encode()
     notes = (bundle_dir / "NOTES.md").read_text()[:20000] if (bundle_dir / "NOTES.md").exists() else ""
     return Bundle(policy, hashlib.sha256(canon).hexdigest(), notes)
