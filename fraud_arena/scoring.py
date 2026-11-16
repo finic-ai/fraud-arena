@@ -16,7 +16,7 @@ import duckdb
 
 from .config import ScoreWeights
 
-ADVERSE = ("decline", "reject", "step_up", "hold", "standard", "review", "raise_alert", "block", "restrict",
+ADVERSE = ("decline", "reject", "deny", "refuse", "step_up", "hold", "standard", "review", "raise_alert", "block", "restrict",
            "close_account")
 
 

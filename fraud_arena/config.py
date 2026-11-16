@@ -30,7 +30,7 @@ class ScoreWeights:
 
     def action_cost(self, action: str, amount: float) -> float:
         a = action.lower()
-        if a in ("decline", "reject"):
+        if a in ("decline", "reject", "deny", "refuse"):
             return self.decline_fixed + self.decline_share_of_amount * max(amount, 0.0)
         if a == "step_up":
             return self.step_up
