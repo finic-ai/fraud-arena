@@ -393,3 +393,19 @@ def test_grayson_gate_config_is_kept_by_the_harness_and_split_by_role():
     assert g == {"a": {"instructions": "i", "criteria": {"x": "1", "y": "2"}}}
     parts = split_by_role(pol, {"a": "r1", "b": "r2"})
     assert parts["r1"]["external"] == {"a": {"timeout": "2d"}} and "external" not in parts["r2"]
+
+
+def test_grayson_combiner_bands_answers_and_features():
+    from fraud_arena.bundle import grayson_action, take_grayson
+    pol = {"external": {"d": {"timeout": "2d", "grayson": {
+        "questions": {"syn": {"instructions": "?", "criteria": {"yes": "", "no": ""}}},
+        "combine": {"intercept": -2.0, "weights": {"syn.yes": 4.0, "id_match": -1.0},
+                    "bands": [{"min": 0.8, "action": "decline"}, {"min": 0.4, "action": "review"}],
+                    "otherwise": "approve"}}}}}
+    q = take_grayson(pol)["d"]
+    hi = {"syn": {"choice": "yes", "probabilities": {"yes": 0.99, "no": 0.01}}}
+    lo = {"syn": {"choice": "no", "probabilities": {"yes": 0.05, "no": 0.95}}}
+    acts = ["approve", "review", "decline"]
+    assert grayson_action(q, {"id_match": 0.2}, hi, acts) == "decline"      # z = -2 + 3.96 - 0.2
+    assert grayson_action(q, {"id_match": 0.9}, lo, acts) == "approve"
+    assert grayson_action(q, {"id_match": 0.0}, {"syn": {"probabilities": {"yes": 0.55}}}, acts) == "review"

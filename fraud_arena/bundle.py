@@ -80,15 +80,59 @@ def load(bundle_dir: Path, *, role: str, decisions: set[str]) -> Bundle:
 
 
 def take_grayson(policy: dict) -> dict[str, dict]:
-    """Grayson at the gates: a deployment's `external: {<decision>: {timeout, grayson: {instructions, criteria}}}`
-    sends that decision's waiting cases to Grayson, answered by the harness each simulated day. The engine sees only
-    the timeout; the harness keeps the Grayson part (`criteria` maps each action to what it means)."""
+    """Grayson at the gates: a deployment's `external: {<decision>: {timeout, grayson: {...}}}` sends that decision's
+    waiting cases to Grayson, answered by the harness at the end of each simulated day. The engine sees only the
+    timeout; the harness keeps the Grayson part, in one of two shapes:
+    - one question whose choice is the action: `{instructions, criteria: {<action>: <meaning>}}`;
+    - several questions combined with the case's features in a logistic layer, with score bands mapped to actions:
+      `{questions: {<q>: {instructions, criteria: {<option>: <meaning>}}}, combine: {intercept, weights:
+      {"<q>.<option>" | "<feature>": w}, bands: [{min: p, action}], otherwise: <action>}}`."""
     out = {}
     for decision, ext in (policy.get("external") or {}).items():
-        if isinstance(ext, dict) and "grayson" in ext:
-            g = ext.pop("grayson") or {}
+        if not (isinstance(ext, dict) and "grayson" in ext):
+            continue
+        g = ext.pop("grayson") or {}
+        if "questions" in g:
+            qs = {str(k): {"instructions": str(v.get("instructions", "")), "criteria": dict(v.get("criteria") or {})}
+                  for k, v in (g.get("questions") or {}).items()}
+            comb = g.get("combine") or {}
+            bands = sorted(({"min": float(b["min"]), "action": str(b["action"])} for b in comb.get("bands", [])),
+                           key=lambda b: -b["min"])
+            if not qs or not bands or "otherwise" not in comb:
+                raise BundleError(f"grayson at {decision}: questions need combine.bands and combine.otherwise")
+            out[decision] = {"questions": qs, "combine": {
+                "intercept": float(comb.get("intercept", 0.0)),
+                "weights": {str(k): float(v) for k, v in (comb.get("weights") or {}).items()},
+                "bands": bands, "otherwise": str(comb["otherwise"])}}
+        else:
             out[decision] = {"instructions": str(g.get("instructions", "")), "criteria": dict(g.get("criteria") or {})}
     return out
+
+
+def grayson_action(q: dict, features: dict, answers: dict, available) -> str | None:
+    """The action for one waiting case from Grayson's answers (and, when combining, the case's features)."""
+    import math
+    if "questions" not in q:
+        choice = ((answers or {}).get("decision") or {}).get("choice")
+        return choice if choice in available else None
+    c = q["combine"]
+    z = c["intercept"]
+    for key, w in c["weights"].items():
+        if "." in key and key.split(".", 1)[0] in q["questions"]:
+            qn, opt = key.split(".", 1)
+            probs = ((answers or {}).get(qn) or {}).get("probabilities") or {}
+            x = probs.get(opt)
+            if x is None:
+                x = 1.0 if ((answers or {}).get(qn) or {}).get("choice") == opt else 0.0
+        else:
+            v = features.get(key)
+            x = float(v) if isinstance(v, (int, float, bool)) else 0.0
+        z += w * float(x)
+    p = 1.0 / (1.0 + math.exp(-z))
+    for band in c["bands"]:
+        if p >= band["min"] and band["action"] in available:
+            return band["action"]
+    return c["otherwise"] if c["otherwise"] in available else None
 
 
 def split_by_role(policy: dict, role_of: dict[str, str]) -> dict[str, dict]:

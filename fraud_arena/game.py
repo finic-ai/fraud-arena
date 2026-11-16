@@ -223,30 +223,34 @@ class Game:
             waiting = [w for w in run.pending_external() if w["decision"] in self.grayson_gates]
             if not waiting:
                 continue
-            reqs, keys = [], []
+            from .bundle import grayson_action
+            by_owner: dict[str, list] = {}
             for w in waiting:
                 owner, q = self.grayson_gates[w["decision"]]
-                crit = {a: m for a, m in q["criteria"].items() if a in (w.get("available") or w["actions"])}
-                if not crit:
-                    continue
-                reqs.append((owner, {"data": w["features"] | {"decision": w["decision"]},
-                                     "questions": {"decision": {"type": "choice", "instructions": q["instructions"],
-                                                                "criteria": crit}}}))
-                keys.append(w["key"])
-            answers = []
-            by_owner: dict[str, list] = {}
-            for (owner, r), k in zip(reqs, keys):
-                by_owner.setdefault(owner, []).append((k, r))
+                avail = list(w.get("available") or w["actions"])
+                if "questions" in q:
+                    questions = {n: {"type": "choice", "instructions": v["instructions"], "criteria": v["criteria"]}
+                                 for n, v in q["questions"].items()}
+                else:
+                    crit = {a: m for a, m in q["criteria"].items() if a in avail}
+                    if not crit:
+                        continue
+                    questions = {"decision": {"type": "choice", "instructions": q["instructions"], "criteria": crit}}
+                req = {"data": w["features"] | {"decision": w["decision"]}, "questions": questions}
+                by_owner.setdefault(owner, []).append((w, q, avail, req))
+            answers, asked = [], 0
             for owner, items in by_owner.items():
                 client = self.grayson_live.get(owner)
                 if client is None:
                     client = self.grayson_live[owner] = GraysonClient(
                         self.out / "grayson-live" / owner, budget=self.cfg.grayson_calls_per_period)
-                outs = client.ask_many([r for _, r in items])
-                for (k, _), o in zip(items, outs):
-                    choice = ((o.get("answers") or {}).get("decision") or {}).get("choice")
-                    if choice:
-                        answers.append((k, choice))
+                outs = client.ask_many([r for *_, r in items])
+                asked += len(items)
+                for (w, q, avail, _), o in zip(items, outs):
+                    act = grayson_action(q, w["features"], o.get("answers") or {}, avail)
+                    if act:
+                        answers.append((w["key"], act))
+            reqs = range(asked)
             if answers:
                 run.answer_external(answers)
             self.log({"event": "grayson_live", "day": d, "asked": len(reqs), "answered": len(answers)})

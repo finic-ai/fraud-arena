@@ -47,3 +47,22 @@ external:
       instructions: "Decide whether to open this account. Synthetic and stolen identities are common here."
       criteria: {approve: "a real person applying for themselves", decline: "a synthetic or stolen identity"}
 ```
+
+Or use Grayson's answers as features: ask several questions per case and combine Grayson's answer probabilities with
+the case's own features in a logistic layer you fit offline (for example on Grayson answers for your labelled cases,
+as in stacking XGBoost with a decision model), with score bands mapped to actions:
+
+```yaml
+external:
+  brind_account_open_review:
+    timeout: 2d
+    grayson:
+      questions:
+        synthetic: {instructions: "Is this a synthetic or stolen identity?", criteria: {yes: "likely", no: "unlikely"}}
+        story: {instructions: "Do the occupation, income and purpose fit together?", criteria: {yes: "they fit", no: "they don't"}}
+      combine:
+        intercept: -2.1
+        weights: {synthetic.yes: 3.4, story.no: 1.2, id_match: -2.0}   # "<question>.<option>" or a feature name
+        bands: [{min: 0.8, action: decline}, {min: 0.4, action: review}]
+        otherwise: approve
+```
