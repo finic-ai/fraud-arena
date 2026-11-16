@@ -15,3 +15,22 @@ Each episode warms the world up, checkpoints it, and forks a candidate run (the 
 (the institution's built-in rules) from the same state; the score is the difference: fraud losses prevented minus
 the cost of friction to good customers, with displacement to other institutions reported. Design:
 [docs/design/20-adversarial-benchmarks.md](https://github.com/finic-ai/runmere/blob/docs/fraud-arena-adversarial-plan/docs/design/20-adversarial-benchmarks.md).
+
+## Replays and the viewer
+
+A game writes `<out>/replay/replay.jsonl` as it runs (`--replay off` to skip it): one JSON frame per simulated day
+and run, one per period boundary with the players' turns, and the score at each boundary. When the match ends the
+file is rebuilt from the scoring's truth exports, so the finished replay is exact. The format is described in
+`fraud_arena/replay.py`. It is truth: public after the match, never shown to a player during it.
+
+    fraud-arena game ... --watch       # serves the viewer on 127.0.0.1 and follows the match live
+    fraud-arena watch <out>            # the same for a running or finished match
+    fraud-arena replay <out>           # rebuilds <out>/replay/ from a match's outputs
+
+The viewer (`viewer/`, TypeScript and PixiJS) builds into `fraud_arena/web/viewer.js` and `viewer.css`
+(`cd viewer && npm ci && npm run build`). To embed it, load both files and leave this element on the page:
+
+    <div id="fraud-arena-viewer" data-replay="https://.../replay.jsonl"></div>
+
+`viewer/sample/replay.jsonl` is a synthetic replay (a toy economy, `python -m fraud_arena.demo <out>`) for demos.
+Open `viewer/index.html` over HTTP to play it; `#day=60&focus=R2&ghost=1&paused=1&turns=35` deep-links a view.

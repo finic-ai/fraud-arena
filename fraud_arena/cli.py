@@ -111,7 +111,7 @@ def game(a) -> int:
                      settle_days=a.settle_days, workflow_timeout_s=a.workflow_timeout,
                      workflows=a.workflows == "on",
                      text_generator=_text_generator_spec(a), attacker_text=a.attacker_text == "on",
-                     text_cache=Path(a.text_cache).expanduser())
+                     text_cache=Path(a.text_cache).expanduser(), replay=a.replay == "on" or a.watch)
     engine = RunmereEngine(Path(a.sandbox))
     users = iter(f"arena-p{n}" for n in range(1, 13))
     insts = a.institution or list(INSTITUTIONS)
@@ -122,7 +122,12 @@ def game(a) -> int:
     g = Game(cfg, engine, players, Path(a.out), Path(a.sandbox), attacker_api=attackers,
              attacker_runners=(lambda i, ring: _player_runner(a.attackers, a, rest[i])) if a.attackers else None,
              max_attackers=min(a.max_attackers, len(rest)), log=log, textgen=_textgen(cfg, a, log))
-    result = g.run()
+    watch = _watch(Path(a.out)) if a.watch else None
+    try:
+        result = g.run()
+    finally:
+        if watch is not None:
+            watch.close()
     print(json.dumps({"defenders": result["defenders"], "attackers": result["attackers"],
                       "tokens": result["tokens"]}, indent=2, default=str))
     return 0
@@ -180,8 +185,53 @@ def main(argv=None) -> int:
     q.add_argument("--proxy")
     q.add_argument("--codex-home", default="/srv/codex-home")
     q.add_argument("--session-timeout", type=int, default=2 * 3600)
+    q.add_argument("--replay", choices=["on", "off"], default="on", help="write <out>/replay/ as the match runs")
+    q.add_argument("--watch", action="store_true",
+                   help="serve the viewer on 127.0.0.1 and follow the match live (stops with the game)")
+    r = sub.add_parser("replay", help="(re)build <out>/replay/ from a match's outputs")
+    r.add_argument("out")
+    r.add_argument("--game-truth", help="a truth folder for the game run (default: <out>/score/game/truth)")
+    r.add_argument("--reference-truth", help="default: <out>/score/reference/truth")
+    r.add_argument("--no-scores", action="store_true", help="skip the exact scores at each boundary")
+    w = sub.add_parser("watch", help="serve the viewer for a running or finished match on 127.0.0.1")
+    w.add_argument("out")
+    w.add_argument("--port", type=int, default=0)
     a = ap.parse_args(argv)
-    return pilot(a) if a.cmd == "pilot" else game(a)
+    return {"pilot": pilot, "game": game, "replay": replay, "watch": watch}[a.cmd](a)
+
+
+def _watch(out: Path, port: int = 0):
+    import sys
+
+    from .watch import Watch
+
+    w = Watch(out, port=port)
+    print(f"watch the match at {w.url}", file=sys.stderr, flush=True)
+    return w
+
+
+def replay(a) -> int:
+    from .replay import rebuild
+
+    out = Path(a.out)
+    stats = rebuild(out, game_truth=Path(a.game_truth) if a.game_truth else None,
+                    ref_truth=Path(a.reference_truth) if a.reference_truth else None, scores=not a.no_scores)
+    print(json.dumps({"replay": str(out / "replay" / "replay.jsonl"), **stats}, indent=2))
+    return 0
+
+
+def watch(a) -> int:
+    import time
+
+    w = _watch(Path(a.out), a.port)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        w.close()
+    return 0
 
 
 if __name__ == "__main__":

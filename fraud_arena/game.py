@@ -84,6 +84,8 @@ class GameConfig:
     # Attackers write a brief per scheme (`briefs/<scheme>.md`) and the rows their rings caused are written from it,
     # with the generator above (the attackers' model); every other row from the world's brief.
     attacker_text: bool = False
+    # Writes `<out>/replay/` as the match runs (fraud_arena.replay); the runs then step one simulated day at a time.
+    replay: bool = True
 
     def boundaries(self):
         end = self.start_day + self.horizon_days
@@ -138,6 +140,8 @@ class Game:
         self.log = log
         self.turns: list[Turn] = []
         self.state = {p.name: EpisodeState() for p in players}
+        self.replay = None
+        self.grayson_asked: dict[str, int] = {}
 
     def workspace(self, p: Player) -> Path:
         ws = self.sandbox / p.name / "workspace"
@@ -188,6 +192,12 @@ class Game:
                 p.runner.extra_env = dict(p.runner.extra_env) | self.broker.env(p.name)
         self.log({"event": "players", "players": [(p.name, p.runner.name, p.runner.model) for p in self.players]})
         bounds = cfg.boundaries()
+        if cfg.replay:
+            from .replay import Recorder
+            self.replay = Recorder(self.out, log=self.log)
+            self.replay.start(config=asdict(cfg), players=self._player_records(), boundaries=bounds,
+                              settle_days=cfg.settle_days, epoch_iso=self.engine.day_iso(any_cfg, 0), game=game,
+                              ref=ref)
         for i in range(len(bounds) - 1):
             b, nxt = bounds[i], bounds[i + 1]
             self.broker.reset_period()
@@ -195,18 +205,60 @@ class Game:
             self.turns += turns
             for t in turns:
                 self.log({"event": "turn", **asdict(t)})
+            if self.replay is not None:
+                self.replay.boundary(b, i, [asdict(t) for t in turns])
             t0 = time.monotonic()
             game = self._advance(game, nxt)
-            ref.run_until_day(nxt)
+            self._run_reference(ref, nxt)
             self.log({"event": "advanced", "day": nxt, "seconds": round(time.monotonic() - t0, 1)})
             self._write_progress()
         if cfg.settle_days:
             end = bounds[-1] + cfg.settle_days
             t0 = time.monotonic()
             game = self._advance(game, end)
-            ref.run_until_day(end)
+            self._run_reference(ref, end)
             self.log({"event": "settled", "day": end, "seconds": round(time.monotonic() - t0, 1)})
-        return self._score(game, ref)
+        result = self._score(game, ref)
+        if self.replay is not None:
+            self.replay.finish(weights=cfg.weights)
+        return result
+
+    def _player_records(self) -> list[dict]:
+        return [{"name": p.name, "side": p.side, "target": p.target, "runner": p.runner.name, "model": p.runner.model}
+                for p in self.players]
+
+    def _harness_counts(self) -> dict:
+        """Each defender's harness-side work so far (cumulative; the replay records it per day)."""
+        out = {}
+        for p in self.players:
+            if p.side != "defender":
+                continue
+            h = {}
+            wf = self.workflow_stats.get(p.name)
+            if wf:
+                h["workflow"] = {"cases": wf["cases"], "actions": dict(wf["actions"])}
+            q = self.queue_stats.get(p.name)
+            if q:
+                h["queue"] = dict(q)
+            if self.grayson_asked.get(p.name):
+                h["grayson"] = self.grayson_asked[p.name]
+            if h:
+                out[p.name] = h
+        return out
+
+    def _replay_day(self, run, d: int, which: str = "game") -> None:
+        if self.replay is not None:
+            self.replay.day(run, d, which, self._harness_counts() if which == "game" else None)
+
+    def _run_reference(self, ref, day: int) -> None:
+        if self.replay is None:
+            ref.run_until_day(day)
+            return
+        d = int(ref.day)
+        while d < day:
+            d += 1
+            ref.run_until_day(d)
+            self._replay_day(ref, d - 1, "reference")
 
     def _advance(self, game, day: int):
         """Advances a fork of the game run, so that a deployed rule that fails at run time (say, a missing feature
@@ -217,6 +269,8 @@ class Game:
             try:
                 self._run_with_grayson(trial, day)
             except ValueError as e:
+                if self.replay is not None:
+                    self.replay.rollback(int(game.day), self._harness_counts())
                 decision = str(e).split(":", 1)[0].strip()
                 role = self.role_of_decision.get(decision)
                 if role is None or role not in self.deployed:
@@ -245,7 +299,14 @@ class Game:
         their answers go back before it continues."""
         outside = bool(self.grayson_gates or self.workflow_dec) and hasattr(run, "pending_external")
         if not outside and not self.queue_grayson and not self.workflows:
-            run.run_until_day(day)
+            if self.replay is None:
+                run.run_until_day(day)
+                return
+            d = int(run.day)
+            while d < day:
+                d += 1
+                run.run_until_day(d)
+                self._replay_day(run, d - 1)
             return
         d = int(run.day)
         while d < day:
@@ -266,6 +327,7 @@ class Game:
                     self._work_queues(run, t)
             if outside and self._day_stats["stops"] + self._day_stats["answered"]:
                 self.log({"event": "outside_decisions", "day": d, **self._day_stats})
+            self._replay_day(run, d - 1)
             if self.workflows and d < day:
                 self._write_live(run)
 
@@ -361,6 +423,7 @@ class Game:
                 continue
             outs = client.ask_many([r for *_, r in items])
             asked += len(items)
+            self.grayson_asked[owner] = self.grayson_asked.get(owner, 0) + len(items)
             logged = []
             for (w, q, avail, req), o in zip(items, outs):
                 act = grayson_action(q, w["features"], o.get("answers") or {}, avail)
@@ -467,6 +530,7 @@ class Game:
                                                        if a in ("release", "reject")}}}
             reqs = [{"data": {k: v for k, v in c.items() if k != "_id"}, "questions": questions} for c in cases]
             outs = client.ask_many(reqs)
+            self.grayson_asked[owner] = self.grayson_asked.get(owner, 0) + len(reqs)
             done, logged = 0, []
             for c, req, o in zip(cases, reqs, outs):
                 act = grayson_action(q, req["data"], o.get("answers") or {}, ["release", "reject"])
@@ -750,8 +814,7 @@ class Game:
             for k, v in t.usage.items():
                 tokens[t.player][k] = tokens[t.player].get(k, 0) + v
         result |= {"config": {k: str(v) for k, v in asdict(cfg).items()},
-                   "players": [{"name": p.name, "side": p.side, "target": p.target, "runner": p.runner.name,
-                                "model": p.runner.model} for p in self.players],
+                   "players": self._player_records(),
                    "turns": [asdict(t) for t in self.turns], "tokens": tokens, "text": self._text_summary(),
                    "decisioning": self._decisioning_summary(),
                    "finished": time.time()}

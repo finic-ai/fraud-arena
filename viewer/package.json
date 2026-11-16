@@ -1,0 +1,21 @@
+{
+  "name": "fraud-arena-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plays a Fraud Arena match replay: the economy's money flows, the players' turns and the scores",
+  "license": "UNLICENSED",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "npm run build:js && npm run build:css",
+    "build:js": "esbuild src/main.ts --bundle --minify --format=iife --target=es2020 --legal-comments=eof --outfile=../fraud_arena/web/viewer.js",
+    "build:css": "esbuild src/viewer.css --minify --outfile=../fraud_arena/web/viewer.css",
+    "build:stdout": "esbuild src/main.ts --bundle --minify --format=iife --target=es2020 --legal-comments=eof"
+  },
+  "dependencies": {
+    "pixi.js": "8.22.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}

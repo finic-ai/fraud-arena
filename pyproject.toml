@@ -27,4 +27,4 @@ build-backend = "setuptools.build_meta"
 include = ["fraud_arena*"]
 
 [tool.setuptools.package-data]
-fraud_arena = ["briefs/*.md", "attacker/*.md"]
+fraud_arena = ["briefs/*.md", "attacker/*.md", "web/*"]
