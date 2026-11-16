@@ -77,7 +77,7 @@ def game(a) -> int:
 
     cfg = GameConfig(world=Path(a.world), seed=a.seed, roots=a.roots, partitions=a.partitions,
                      start_day=a.start_day, period_days=a.period_days, horizon_days=a.horizon_days,
-                     grayson_calls_per_period=a.grayson_budget)
+                     grayson_calls_per_period=a.grayson_budget, settle_days=a.settle_days)
     engine = RunmereEngine(Path(a.sandbox))
     users = iter(f"arena-p{n}" for n in range(1, 13))
     insts = a.institution or list(INSTITUTIONS)
@@ -132,6 +132,7 @@ def main(argv=None) -> int:
     q.add_argument("--period-days", type=int, default=30)
     q.add_argument("--horizon-days", type=int, default=120)
     q.add_argument("--grayson-budget", type=int, default=200)
+    q.add_argument("--settle-days", type=int, default=30, help="frozen run-on after the last period, before scoring")
     q.add_argument("--proxy")
     q.add_argument("--codex-home", default="/srv/codex-home")
     q.add_argument("--session-timeout", type=int, default=2 * 3600)

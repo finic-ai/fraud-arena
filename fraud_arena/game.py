@@ -65,6 +65,9 @@ class GameConfig:
     weights: ScoreWeights = field(default_factory=ScoreWeights)
     grayson_calls_per_period: int = 200
     max_waits: int = 20
+    # After the last period the world runs on with every bundle and plan frozen and no sessions, so fraud of the
+    # last weeks can settle (chargebacks, returns, disputes arrive late) before scoring.
+    settle_days: int = 30
 
     def boundaries(self):
         end = self.start_day + self.horizon_days
@@ -127,6 +130,12 @@ class Game:
             ref.run_until_day(nxt)
             self.log({"event": "advanced", "day": nxt, "seconds": round(time.monotonic() - t0, 1)})
             self._write_progress()
+        if cfg.settle_days:
+            end = bounds[-1] + cfg.settle_days
+            t0 = time.monotonic()
+            game.run_until_day(end)
+            ref.run_until_day(end)
+            self.log({"event": "settled", "day": end, "seconds": round(time.monotonic() - t0, 1)})
         return self._score(game, ref)
 
     def _period(self, game, b: int, first: bool) -> list[Turn]:
@@ -220,7 +229,7 @@ class Game:
         cfg = self.cfg
         any_cfg = cfg.for_institution(next(iter(INSTITUTIONS)))
         start = self.engine.day_iso(any_cfg, cfg.start_day)
-        end = self.engine.day_iso(any_cfg, cfg.start_day + cfg.horizon_days)
+        end = self.engine.day_iso(any_cfg, cfg.start_day + cfg.horizon_days + cfg.settle_days)
         exports = {name: self.engine.export_scoring(run, any_cfg, self.out / "score" / name)
                    for name, run in (("game", game), ("reference", ref))}
         result = {"defenders": {}, "attackers": {}}
