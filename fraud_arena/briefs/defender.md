@@ -7,7 +7,10 @@ phase). Today is day {day}; the episode ends on day {end_day}. You deploy once n
 What you can use
 - The `arena` MCP tools: SQL over {institution}'s own tables as of today (customers, accounts, transactions, logins,
   disputes, claims, alerts, ...), record lookup, and the list of decision points with the features each one sees.
-  That is all the data there is: the institution's own records, with fraud reports arriving late and incomplete, as
+  The `PUBLIC_*` tables are what anyone can look up: the social platform's ad library and public profiles and
+  listings, registered domains and their websites' pages, the public block explorer. Use them to investigate (a
+  payee's online presence, the ad behind a scam, a business's website).
+  That is all the data there is: the institution's own records and the public web, with fraud reports arriving late and incomplete, as
   in reality. Nothing in the world tells you which activity was fraud except what those records say.
 - This workspace persists between boundaries. Keep your code, models and notes here (`NOTES.md` is a good place for
   your plan). Python with pandas, scikit-learn, xgboost and lightgbm is installed.

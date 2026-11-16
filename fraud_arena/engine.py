@@ -97,11 +97,20 @@ class RunmereEngine:
     def _tables_dir(self, run, cfg, tag: str | None) -> Path:
         return self._agent_dir(cfg, f"{tag + '-' if tag else ''}data-day{int(run.day)}")
 
+    PUBLIC_OBSERVER = "public"
+
     def write_tables(self, run, cfg, tag: str | None = None) -> Path:
-        """The institution's tables as of now, once per boundary, where the player's user can read them."""
+        """The institution's tables as of now, once per boundary, where the player's user can read them, and the
+        public data anyone can look up (the ad library, public profiles and listings, domains and websites, the block
+        explorer) under `public/`, served as `PUBLIC_<TABLE>`: a fraud team investigates with what's public too."""
         data = self._tables_dir(run, cfg, tag)
         if not any(data.iterdir()):
             run.write_observer(cfg.observer, str(data))
+            try:
+                (data / "public").mkdir(exist_ok=True)
+                run.write_observer(self.PUBLIC_OBSERVER, str(data / "public"))
+            except Exception:  # a world without a public observer
+                pass
         return data
 
     @contextmanager
@@ -125,7 +134,7 @@ class RunmereEngine:
         institution's own records, as of now."""
         c = duckdb.connect()
         out = {}
-        for f in sorted(Path(data).rglob("*.parquet")):
+        for f in sorted(Path(data).glob("*.parquet")):
             name = f.stem.upper()
             if not self.SIGNALS.search(name):
                 continue
