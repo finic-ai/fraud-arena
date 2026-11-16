@@ -57,9 +57,13 @@ class Attackers:
         return self.schema(ring)
 
     def brief(self, *, ring: int, day: int, end_day: int, period_days: int, first: bool, last_error: str | None,
-              boundary: int, boundaries: int) -> str:
+              boundary: int, boundaries: int, attacker_text: bool = False, text_notes: list[str] | None = None) -> str:
+        schemes = None
+        if attacker_text:
+            from ..textgen import scheme_texts
+            schemes = scheme_texts(self.world, ring)
         text = operator.brief(ring=ring, schema=self.schema(ring), day=day, period_days=period_days,
-                              boundary=boundary, boundaries=boundaries)
+                              boundary=boundary, boundaries=boundaries, text_schemes=schemes, text_notes=text_notes)
         text += (f"\n\nThe ring's capacity is limited: a scheme runs at most {self.MAX_SCHEME_MULTIPLIER:g}x its "
                  "usual rate (volume times the scheme's tactic weight); weights above that are scaled down.")
         if last_error:

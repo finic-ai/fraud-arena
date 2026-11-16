@@ -82,10 +82,34 @@ def _menu_text(schema: dict) -> str:
     return "\n".join(lines)
 
 
-def brief(*, ring: int, schema: dict, day: int, period_days: int, boundary: int, boundaries: int) -> str:
+AUTHORING = ("You don't write any messages, scripts or techniques. You only set the ring's strategy for the next "
+             "period, by choosing\nvalues from a fixed menu, and the world carries it out with its own scripted "
+             "machinery.")
+AUTHORING_TEXT = ("You don't write scripts or techniques, or the messages the ring sends its victims. You set the "
+                  "ring's strategy for the\nnext period by choosing values from a fixed menu, and the world carries "
+                  "it out with its own scripted machinery.\nYou may also brief how the texts that the ring's schemes "
+                  "leave at the institutions and in public read (below).")
+
+
+def brief(*, ring: int, schema: dict, day: int, period_days: int, boundary: int, boundaries: int,
+          text_schemes: dict[str, list[str]] | None = None, text_notes: list[str] | None = None) -> str:
+    """The attacker's brief. With `text_schemes` (attacker-authored text is on: scheme -> the texts it produces),
+    it also explains the scheme briefs."""
     text = resources.files(__package__).joinpath("brief.md").read_text()
     return text.format(ring=f"R{ring}", day=day, period_days=period_days, next_day=day + period_days,
-                       boundary=boundary, boundaries=boundaries, menu=_menu_text(schema))
+                       boundary=boundary, boundaries=boundaries, menu=_menu_text(schema),
+                       authoring=AUTHORING if text_schemes is None else AUTHORING_TEXT,
+                       texts="" if text_schemes is None else _texts_text(text_schemes, text_notes or []))
+
+
+def _texts_text(schemes: dict[str, list[str]], notes: list[str]) -> str:
+    text = resources.files(__package__).joinpath("text_brief.md").read_text()
+    lines = [f"- `{s}`: " + "; ".join(kinds) for s, kinds in sorted(schemes.items())] or \
+        ["- (none of the ring's schemes writes such texts)"]
+    out = text.format(schemes="\n".join(lines))
+    if notes:
+        out += "\nLast period's briefs: " + "; ".join(notes)
+    return "\n" + out
 
 
 def _model_version(log: Path | None) -> str | None:

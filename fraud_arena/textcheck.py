@@ -1,6 +1,6 @@
 """The style check, grader side: can a classifier that reads only a text cell tell fraud rows from ordinary ones?
 
-For each rich text column (`textgen.RICH`), rows are labelled from the run's truth: `row_links` maps a row of an
+For each rich text spec (`textgen.RICH`; a spec's columns are read together), rows are labelled from the run's truth: `row_links` maps a row of an
 observer table to its event, and the row is fraud when the event's cause is a scenario. Two classifiers, each scored
 by stratified cross-validated AUC:
 
@@ -152,32 +152,48 @@ def cv_auc(X, y, folds=5, seed=0) -> float | None:
     return round(auc(y, scores), 3)
 
 
-def check(truth: Path, tables: Path) -> dict:
-    """AUCs per rich text column of the observer folders under `tables` (a render, or a copy of one)."""
+def check(truth: Path, tables: Path | dict[str, Path], ring_rows: set | None = None) -> dict:
+    """AUCs per rich text spec. `tables` is a folder of observer folders (a render, or a copy of one), or
+    {observer: folder}. With `ring_rows` ((observer, table, row) of the rows the attacker rings caused), also the
+    AUCs of those rows against ordinary ones: what the attackers' briefs did to their texts' style."""
+    folders = tables if isinstance(tables, dict) else {s.observer: Path(tables) / s.observer for s in RICH}
     out = {}
-    for col in RICH:
-        path = Path(tables) / col.institution / f"{col.table}.parquet"
-        name = f"{col.institution}.{col.table}.{col.column}"
+    for spec in RICH:
+        if spec.observer not in folders:
+            continue
+        path = Path(folders[spec.observer]) / f"{spec.table}.parquet"
+        name = f"{spec.observer}.{spec.table}"
         if not path.exists():
             continue
-        labels = row_truth(truth, col.institution, col.table)
+        labels = row_truth(truth, spec.observer, spec.table)
         if labels is None:
             out[name] = {"error": "no row truth yet (row_links is empty)"}
             continue
         table = pq.read_table(path)
-        texts = table.column(col.column).to_pylist()
-        facts = [{c: table.column(c)[i].as_py() for c in col.facts if c in table.column_names}
+        cols = [c for c in spec.names if c in table.column_names]
+        texts = [" \n".join(t for t in vals if t) for vals in zip(*(table.column(c).to_pylist() for c in cols))]
+        facts = [{c: table.column(c)[i].as_py() for c in spec.facts if c in table.column_names}
                  for i in range(table.num_rows)]
         idx = [i for i, t in enumerate(texts) if t and i in labels]
-        y = [int(labels[i]) for i in idx]
-        tx = [texts[i] for i in idx]
-        rec = {"rows": len(y), "fraud": sum(y)}
-        if 0 < sum(y) < len(y):
-            rec["auc_ngram"] = cv_auc(ngram_features(tx), y)
-            rec["auc_style"] = cv_auc(style_features(tx), y)
-            rec["auc_facts"] = cv_auc(facts_features([facts[i] for i in idx]), y)
+        rec = {"rows": len(idx)}
+        rec |= _aucs("", [texts[i] for i in idx], [facts[i] for i in idx], [int(labels[i]) for i in idx])
+        if ring_rows is not None:
+            ring = [i for i in idx if (spec.observer, spec.table, i) in ring_rows]
+            ordinary = [i for i in idx if not labels[i]]
+            sub = ring + ordinary
+            rec |= _aucs("ring_", [texts[i] for i in sub], [facts[i] for i in sub],
+                         [1] * len(ring) + [0] * len(ordinary))
         out[name] = rec
     return out
+
+
+def _aucs(prefix: str, texts: list[str], facts: list[dict], y: list[int]) -> dict:
+    rec = {f"{prefix}rows" if prefix else "fraud": sum(y)}
+    if 0 < sum(y) < len(y):
+        rec[f"{prefix}auc_ngram"] = cv_auc(ngram_features(texts), y)
+        rec[f"{prefix}auc_style"] = cv_auc(style_features(texts), y)
+        rec[f"{prefix}auc_facts"] = cv_auc(facts_features(facts), y)
+    return rec
 
 
 def main(argv=None):
