@@ -66,3 +66,18 @@ external:
         bands: [{min: 0.8, action: decline}, {min: 0.4, action: review}]
         otherwise: approve
 ```
+
+## Grayson working your review queue (optional)
+
+Every case your rules hold (`hold`, `review`, ...) waits in `REVIEW_QUEUE` until a verdict or its due time. Grayson
+can work the queue for you: each simulated day it gets the pending cases (their `REVIEW_QUEUE` fields, nothing else)
+and its verdict (`release` or `reject`) is applied. Use either shape above; the actions are `release` and `reject`.
+It doesn't use your human team's capacity; you can still review cases yourself in `reviews.json`.
+
+```yaml
+review_queue:
+  kinds: [p2p_hold, wire_hold, account_application]   # optional: only these case kinds
+  grayson:
+    instructions: "Release unless this looks like fraud or a scam in progress."
+    criteria: {release: "genuine", reject: "fraud or a scam"}
+```

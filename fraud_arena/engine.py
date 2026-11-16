@@ -79,6 +79,14 @@ class RunmereEngine:
         names |= set(re.findall(r"^\s*label:\s*([a-z_0-9]+)\s*$", text, re.M))
         return names - self.META_LABELS
 
+    def observable_scalars(self, cfg, entity: str) -> list[str]:
+        """An entity type's observable attributes that are plain values (no refs, which would carry stable ids), from
+        the world's declarations: what may be shown about it to a decision model."""
+        ents = self.spec(cfg)["world"].get("entities") if "world" in self.spec(cfg) else self.spec(cfg).get("entities")
+        attrs = ((ents or {}).get(entity) or {}).get("attributes") or {}
+        return sorted(k for k, v in attrs.items() if (v or {}).get("visibility", "observable") == "observable"
+                      and (v or {}).get("type") != "ref")
+
     def decisions_of(self, cfg) -> set[str]:
         return {d["decision"] for d in self.decision_points(cfg)}
 

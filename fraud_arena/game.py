@@ -106,6 +106,7 @@ class Game:
         self.last_tables: dict[str, Path] = {}
         self.grayson_gates: dict[str, tuple[str, dict]] = {}  # decision -> (defender, question)
         self.grayson_live: dict[str, object] = {}
+        self.queue_grayson: dict[str, tuple[str, dict]] = {}  # defender -> (institution, grayson config)
         self.textgen = textgen if textgen is not None else _textgen(cfg, Path(out))
         self.briefs: dict[int, dict[str, str]] = {}  # ring -> scheme -> its attacker's latest brief
         self.brief_notes: dict[str, list[str]] = {}
@@ -212,7 +213,7 @@ class Game:
     def _run_with_grayson(self, run, day: int) -> None:
         """Runs to `day`. When a defender sends a decision to Grayson (`external` with a `grayson` question), the run
         goes one simulated day at a time and the cases waiting at each day's end go to Grayson in one batch."""
-        if not self.grayson_gates or not hasattr(run, "pending_external"):
+        if not (self.grayson_gates and hasattr(run, "pending_external")) and not self.queue_grayson:
             run.run_until_day(day)
             return
         from .grayson import GraysonClient
@@ -220,7 +221,10 @@ class Game:
         while d < day:
             d += 1
             run.run_until_day(min(d, day))
-            waiting = [w for w in run.pending_external() if w["decision"] in self.grayson_gates]
+            if self.queue_grayson:
+                self._grayson_queue(run, d)
+            waiting = ([w for w in run.pending_external() if w["decision"] in self.grayson_gates]
+                       if self.grayson_gates and hasattr(run, "pending_external") else [])
             if not waiting:
                 continue
             from .bundle import grayson_action
@@ -254,6 +258,45 @@ class Game:
             if answers:
                 run.answer_external(answers)
             self.log({"event": "grayson_live", "day": d, "asked": len(reqs), "answered": len(answers)})
+
+    def _grayson_queue(self, run, day: int) -> None:
+        """Grayson works a defender's review queue: each simulated day, the held cases still pending go to Grayson
+        with only their observable plain fields (the world's declarations), and its verdicts are set as the cases'
+        `manual_verdict`, as a human review's would be (it doesn't use the human team's capacity)."""
+        from .bundle import grayson_action
+        from .grayson import GraysonClient
+        for owner, (inst, q) in self.queue_grayson.items():
+            ecfg = self.cfg.for_institution(inst)
+            fields = [f for f in self.engine.observable_scalars(ecfg, "review_case") if f != "manual_verdict"]
+            inst_id = {r["name"]: r["id"] for r in run.rows("institution", ["name"])}.get(inst)
+            cases = [r for r in run.rows("review_case", fields + ["institution", "manual_verdict"],
+                                         where_attr="manual_verdict", equals="pending")
+                     if r.get("institution") == inst_id and (not q["kinds"] or r.get("kind") in q["kinds"])]
+            if not cases:
+                continue
+            reqs = []
+            for r in cases:
+                data = {k: r.get(k) for k in fields if r.get(k) is not None}
+                if "questions" in q:
+                    questions = {n: {"type": "choice", "instructions": v["instructions"], "criteria": v["criteria"]}
+                                 for n, v in q["questions"].items()}
+                else:
+                    questions = {"decision": {"type": "choice", "instructions": q["instructions"],
+                                              "criteria": {a: m for a, m in q["criteria"].items()
+                                                           if a in ("release", "reject")}}}
+                reqs.append({"data": json.loads(json.dumps(data, default=str)), "questions": questions})
+            client = self.grayson_live.get(owner)
+            if client is None:
+                client = self.grayson_live[owner] = GraysonClient(
+                    self.out / "grayson-live" / owner, budget=self.cfg.grayson_calls_per_period)
+            outs = client.ask_many(reqs)
+            done = 0
+            for r, req, o in zip(cases, reqs, outs):
+                act = grayson_action(q, req["data"], o.get("answers") or {}, ["release", "reject"])
+                if act:
+                    run.intervene("review_case", r["id"], "manual_verdict", act)
+                    done += 1
+            self.log({"event": "grayson_queue", "player": owner, "day": day, "cases": len(cases), "decided": done})
 
     def _period(self, game, b: int, first: bool) -> list[Turn]:
         if self.textgen is not None:
@@ -333,11 +376,19 @@ class Game:
                 if bun.digest != st.last_deploy:
                     role_of = self.engine.role_of(ecfg)
                     policy = json.loads(json.dumps(bun.policy))
+                    policy.pop("review_queue", None)
                     gray = bundles.take_grayson(policy)
                     for decision in [d for d, o in self.grayson_gates.items() if o[0] == p.name]:
                         del self.grayson_gates[decision]
                     for decision, q in gray.items():
                         self.grayson_gates[decision] = (p.name, q)
+                    rq = (bun.policy.get("review_queue") or {}).get("grayson")
+                    if rq and p.name in self.review_on:
+                        q = bundles.take_grayson({"external": {"queue": {"grayson": json.loads(json.dumps(rq))}}})["queue"]
+                        self.queue_grayson[p.name] = (p.target, q | {"kinds": list(
+                            (bun.policy.get("review_queue") or {}).get("kinds") or [])})
+                    else:
+                        self.queue_grayson.pop(p.name, None)
                     parts = bundles.split_by_role(policy, role_of)
                     self.role_of_decision.update(role_of)
                     for role in [r for r in ecfg.roles if r in set(role_of.values())]:
