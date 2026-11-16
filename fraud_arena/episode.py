@@ -65,6 +65,18 @@ class EpisodeState:
     last_error: str | None = None
 
 
+WORKFLOW_SECTION = """Or decide in your own code: `bundle/workflow.py` with `DECISIONS = [...]` (the decision points it decides) and
+`def decide(decision, cases) -> list[str]`. Each simulated step, every case at those decision points comes to it in
+one batch: each case is the decision's observation features plus `_actions`, the actions allowed; return one action
+per case, in order. Arrange rules, models{wf_grayson} however you like; module-level code runs once (load your
+models there). It runs as you, from a copy of `bundle/` taken at deploy, in this workspace, without network{wf_net}.
+A decision point it claims with no rule of yours in `policy.yaml` sends every case to it; your own rules with
+`action: external` send it only the cases they match (the rest decided by your rules). Keep it fast: tens of thousands
+of cases a week. A crash, a timeout (10 minutes per batch) or an action not allowed takes the bundle back, as a rule
+failing at run time does. Test it first: `fa-workflow cases.jsonl --decision <d>`. What it prints goes to
+`.arena/workflow.log`."""
+
+
 def brief_text(cfg: EpisodeConfig, boundary: int, outcomes: dict, state: EpisodeState, *, first: bool,
                families=None) -> str:
     tpl = resources.files("fraud_arena").joinpath("briefs/defender.md").read_text()
@@ -86,8 +98,10 @@ def brief_text(cfg: EpisodeConfig, boundary: int, outcomes: dict, state: Episode
     else:
         grayson = "- Grayson isn't available in this game: build your detection from rules, models and review."
         wf_grayson, wf_net = "", ""
+    workflow_section = (WORKFLOW_SECTION.format(wf_grayson=wf_grayson, wf_net=wf_net) if cfg.workflows
+                        else "")
     return tpl.format(
-        grayson=grayson, workflow_grayson=wf_grayson, workflow_net=wf_net,
+        grayson=grayson, workflow_section=workflow_section,
         institution=cfg.institution, role=cfg.role, day=boundary, period_days=cfg.period_days,
         end_day=cfg.start_day + cfg.horizon_days, phase=cfg.phase,
         first="This is the first boundary: build your stack from the history." if first

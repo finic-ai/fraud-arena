@@ -63,6 +63,7 @@ class EpisodeConfig:
     phase: str = "static"
     weights: ScoreWeights = field(default_factory=ScoreWeights)
     grayson_calls_per_period: int = 10000
+    workflows: bool = True
 
     def __post_init__(self):
         if self.institution not in INSTITUTIONS:

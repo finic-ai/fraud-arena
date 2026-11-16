@@ -109,6 +109,7 @@ def game(a) -> int:
                      start_day=a.start_day, period_days=a.period_days, horizon_days=a.horizon_days,
                      grayson_calls_per_period=a.grayson_budget, grayson=a.grayson == "on",
                      settle_days=a.settle_days, workflow_timeout_s=a.workflow_timeout,
+                     workflows=a.workflows == "on",
                      text_generator=_text_generator_spec(a), attacker_text=a.attacker_text == "on",
                      text_cache=Path(a.text_cache).expanduser())
     engine = RunmereEngine(Path(a.sandbox))
@@ -166,6 +167,8 @@ def main(argv=None) -> int:
     q.add_argument("--horizon-days", type=int, default=120)
     q.add_argument("--grayson-budget", type=int, default=50000, help="Grayson calls per defender per period")
     q.add_argument("--grayson", choices=["on", "off"], default="on", help="off: the no-Grayson game")
+    q.add_argument("--workflows", choices=["on", "off"], default="on",
+                   help="off: no workflow.py (an engine without external decisions at event gates)")
     q.add_argument("--workflow-timeout", type=float, default=600.0, help="seconds per batch of a workflow.py")
     q.add_argument("--text-generator", default="none",
                    help="claude-code:sonnet|claude-code:opus|codex:<model>|none: rewrites the defenders' rich text")

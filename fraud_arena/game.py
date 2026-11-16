@@ -69,6 +69,8 @@ class GameConfig:
     # False is the no-Grayson game: the broker refuses every call and the brief says Grayson isn't available.
     grayson: bool = True
     workflow_timeout_s: float = 600.0
+    # False when the engine can't hand event-gate cases out yet: workflow.py isn't offered or deployed.
+    workflows: bool = True
     max_waits: int = 20
     # After the last period the world runs on with every bundle and plan frozen and no sessions, so fraud of the
     # last weeks can settle (chargebacks, returns, disputes arrive late) before scoring.
@@ -91,7 +93,8 @@ class GameConfig:
         return EpisodeConfig(world=self.world, institution=inst, seed=self.seed, roots=self.roots,
                              partitions=self.partitions, start_day=self.start_day, period_days=self.period_days,
                              horizon_days=self.horizon_days, weights=self.weights,
-                             grayson_calls_per_period=self.grayson_calls_per_period if self.grayson else 0)
+                             grayson_calls_per_period=self.grayson_calls_per_period if self.grayson else 0,
+                             workflows=self.workflows)
 
 
 class Game:
@@ -452,6 +455,8 @@ class Game:
                     if (gray or (bun.policy.get("review_queue") or {}).get("grayson")) and not self.cfg.grayson:
                         raise bundles.BundleError("Grayson isn't available in this game")
                     snap, claimed = None, []
+                    if (bdir / "workflow.py").exists() and not self.cfg.workflows:
+                        raise bundles.BundleError("decision workflows (workflow.py) aren't available in this game")
                     if (bdir / "workflow.py").exists():
                         from .workflow import Workflow, WorkflowError
                         snap = self.sandbox / p.name / "deployed" / f"{b}-{digest[:12]}"

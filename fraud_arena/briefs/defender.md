@@ -45,16 +45,7 @@ or a tree ensemble dumped from XGBoost / LightGBM, see the tool `deploy_format`)
 Every rule is checked against `decision_points`: rules, models, Grayson and review are all yours to combine as you see
 fit; nothing requires any of them.
 
-Or decide in your own code: `bundle/workflow.py` with `DECISIONS = [...]` (the decision points it decides) and
-`def decide(decision, cases) -> list[str]`. Each simulated step, every case at those decision points comes to it in
-one batch: each case is the decision's observation features plus `_actions`, the actions allowed; return one action
-per case, in order. Arrange rules, models{workflow_grayson} however you like; module-level code runs once (load your
-models there). It runs as you, from a copy of `bundle/` taken at deploy, in this workspace, without network{workflow_net}.
-A decision point it claims with no rule of yours in `policy.yaml` sends every case to it; your own rules with
-`action: external` send it only the cases they match (the rest decided by your rules). Keep it fast: tens of thousands
-of cases a week. A crash, a timeout (10 minutes per batch) or an action not allowed takes the bundle back, as a rule
-failing at run time does. Test it first: `fa-workflow cases.jsonl --decision <d>`. What it prints goes to
-`.arena/workflow.log`. Write `bundle/NOTES.md` with what
+{workflow_section} Write `bundle/NOTES.md` with what
 you changed and why.
 
 How you are scored
