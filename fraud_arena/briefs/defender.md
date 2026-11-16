@@ -15,12 +15,20 @@ What you can use
   "choice", "instructions": "...", "criteria": {{"<option>": "<meaning>"}}}}}}}}`. Use it to review cases, label
   training data or check a rule's hits. You have {grayson_budget} calls this period (`fa-grayson budget`).
 
+Your review team
+- {institution} has a human review team with a fixed number of reviews a day. Your detection can send cases to it
+  (actions such as `review`, `hold` or `raise_alert`), and the decisions whose role ends in `_analyst` in
+  `decision_points` are the team's verdicts on the cases it reviews: write rules for those too. Cases beyond the team's
+  capacity wait in its queue while the customer waits, so send it the cases where a human review pays off.
+
 What you deploy
 Write `bundle/policy.yaml` before you finish: a Runmere deployed policy for role `{role}`. For each decision point
 you change, ordered rules choose an action when their `when` holds over the decision's observation features
 (`obs.<feature>`) and your models' scores. Models go in `bundle/models/*.json` (a linear or logistic model's weights,
 or a tree ensemble dumped from XGBoost / LightGBM, see the tool `deploy_format`), referenced from the policy with
-`file:`. A decision point you don't mention keeps the institution's built-in rule. Write `bundle/NOTES.md` with what
+`file:`. A decision point you don't mention keeps the institution's built-in rule.
+Every rule is checked against `decision_points`: rules, models, Grayson and review are all yours to combine as you see
+fit; nothing requires any of them. Write `bundle/NOTES.md` with what
 you changed and why.
 
 How you are scored
