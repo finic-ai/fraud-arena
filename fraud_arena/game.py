@@ -186,7 +186,12 @@ class Game:
                 bun = bundles.load(self.workspace(p) / "bundle", role=ecfg.role,
                                    decisions=self.engine.decisions_of(ecfg))
                 if bun.digest != st.last_deploy:
-                    game.deploy(ecfg.role, bun.policy)
+                    parts = bundles.split_by_role(bun.policy, self.engine.role_of(ecfg))
+                    for role in ecfg.roles:
+                        if role in parts:
+                            game.deploy(role, parts[role])
+                        elif hasattr(game, "deployed") and game.deployed(role):
+                            game.undeploy(role)
                     keep = self.out / "bundles" / f"{p.name}-{b}-{bun.digest[:12]}.json"
                     keep.parent.mkdir(parents=True, exist_ok=True)
                     keep.write_text(json.dumps({"policy": bun.policy, "notes": bun.notes}, default=str))

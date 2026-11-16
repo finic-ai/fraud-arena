@@ -51,24 +51,29 @@ class RunmereEngine:
         w = self.world(cfg)
         if hasattr(w, "decisions"):
             out = []
-            for d in w.decisions(cfg.role):
+            roles = [r for r in cfg.roles if any(x["role"] == r for x in w.decisions())]
+            for d in [x for r in roles for x in w.decisions(r)]:
                 feats = [{"name": f[0], "kind": f[1]} if isinstance(f, (list, tuple)) else f for f in d["features"]]
-                out.append({"decision": d["name"], "actions": d["actions"], "default_action": d["default_action"],
+                out.append({"decision": d["name"], "role": d["role"], "actions": d["actions"],
+                            "default_action": d["default_action"],
                             "observation": d.get("observation"), "params": d.get("params"), "features": feats})
             return out
         env = self.spec(cfg)["env"]
         out = []
         for name, d in env["decisions"].items():
-            if d.get("role") != cfg.role:
+            if d.get("role") not in cfg.roles:
                 continue
             obs = env["observations"].get(d.get("observation"), {})
-            out.append({"decision": name, "at": d.get("at"), "actions": d.get("actions"),
+            out.append({"decision": name, "role": d.get("role"), "at": d.get("at"), "actions": d.get("actions"),
                         "default_action": d.get("default_action"), "features": sorted((obs.get("features") or {})),
                         "tables": obs.get("tables", [])})
         return out
 
     def decisions_of(self, cfg) -> set[str]:
         return {d["decision"] for d in self.decision_points(cfg)}
+
+    def role_of(self, cfg) -> dict[str, str]:
+        return {d["decision"]: d["role"] for d in self.decision_points(cfg)}
 
     def day_iso(self, cfg, day: int) -> str:
         epoch = datetime.fromisoformat(self.spec(cfg)["clock"]["epoch"].replace("Z", "+00:00"))

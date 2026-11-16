@@ -182,4 +182,32 @@ class CodexRunner(AgentRunner):
         return ok, text, usage, session
 
 
-RUNNERS = {"claude-code": ClaudeCodeRunner, "codex": CodexRunner}
+# Most adverse first: what a defender that stops everything picks at each decision.
+_SEVERITY = ["block", "decline", "reject", "deny", "refuse", "close_account", "cancel", "hold", "standard", "restrict",
+             "review", "raise_alert", "file_sar", "step_up"]
+
+
+class BlockAllRunner(AgentRunner):
+    """Baseline defender, no model: every decision takes its most adverse action. It shows that friction is priced:
+    stopping everything must score far below the built-in rules."""
+
+    name = "baseline"
+
+    def __init__(self, model: str = "block-all", **kw):
+        super().__init__(model, timeout_s=60)
+
+    def run(self, workspace, prompt, servers, log):
+        args = list(servers[0].args) if servers else []
+        points = json.loads(Path(args[args.index("--decisions") + 1]).read_text()) if "--decisions" in args else []
+        rules = []
+        for d in points:
+            acts = d["actions"] if isinstance(d["actions"], list) else list(d["actions"])
+            pick = next((a for a in _SEVERITY if a in acts), d.get("default_action"))
+            rules.append({"decision": d["decision"], "action": pick})
+        (workspace / "bundle").mkdir(parents=True, exist_ok=True)
+        import yaml
+        (workspace / "bundle" / "policy.yaml").write_text(yaml.safe_dump({"format": 1, "rules": rules}))
+        return SessionResult(self.name, self.model, True, f"{len(rules)} rules", 0.0, {})
+
+
+RUNNERS = {"claude-code": ClaudeCodeRunner, "codex": CodexRunner, "baseline": BlockAllRunner}

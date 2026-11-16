@@ -23,6 +23,7 @@ class Engine:
     def start(self, cfg): return Run()
     def world(self, cfg): return None
     def decisions_of(self, cfg): return {"brind_card_auth"}
+    def role_of(self, cfg): return {"brind_card_auth": "brind_defender"}
     def write_tables(self, run, cfg, tag=None): pass
     @contextmanager
     def tool_server(self, run, cfg, workspace=None, tag=None): yield McpServer("arena", url="http://x/mcp")

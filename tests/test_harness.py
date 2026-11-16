@@ -269,3 +269,16 @@ def test_pass_through_mules_are_not_losses_even_unlabelled(tmp_path):
     assert b.losses == 100.0 and b.losses_by_scenario == {"romance_scam": 100.0}
     assert d.losses == 0.0 and b.displacement == 0.0
     assert d.mule_flow == 95.0 and b.mule_flow == 0.0
+
+
+def test_block_all_baseline_picks_the_most_adverse_action(tmp_path):
+    from fraud_arena.runners import BlockAllRunner
+    pts = [{"decision": "a", "actions": ["approve", "decline", "step_up"], "default_action": "approve"},
+           {"decision": "b", "actions": ["instant", "standard"], "default_action": "instant"},
+           {"decision": "c", "actions": ["refund", "review", "deny"], "default_action": "refund"}]
+    (tmp_path / "d.json").write_text(json.dumps(pts))
+    srv = McpServer("arena", command="x", args=("--decisions", str(tmp_path / "d.json")))
+    BlockAllRunner().run(tmp_path, "", [srv], tmp_path / "log")
+    import yaml
+    rules = yaml.safe_load((tmp_path / "bundle" / "policy.yaml").read_text())["rules"]
+    assert {r["decision"]: r["action"] for r in rules} == {"a": "decline", "b": "standard", "c": "deny"}

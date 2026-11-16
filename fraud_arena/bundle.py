@@ -77,3 +77,20 @@ def load(bundle_dir: Path, *, role: str, decisions: set[str]) -> Bundle:
     canon = json.dumps(policy, sort_keys=True, default=str).encode()
     notes = (bundle_dir / "NOTES.md").read_text()[:20000] if (bundle_dir / "NOTES.md").exists() else ""
     return Bundle(policy, hashlib.sha256(canon).hexdigest(), notes)
+
+
+def split_by_role(policy: dict, role_of: dict[str, str]) -> dict[str, dict]:
+    """One deployment per role (the engine deploys into one role at a time): each role's rules, and the models its
+    rules read (`score.<model>`)."""
+    out: dict[str, dict] = {}
+    models = policy.get("models") or {}
+    for r in policy.get("rules", []):
+        role = role_of[r["decision"]]
+        out.setdefault(role, {k: v for k, v in policy.items() if k not in ("rules", "models")} | {"rules": []})
+        out[role]["rules"].append(r)
+    for role, dep in out.items():
+        text = json.dumps(dep["rules"])
+        used = {m: models[m] for m in models if f"score.{m}" in text}
+        if used:
+            dep["models"] = used
+    return out

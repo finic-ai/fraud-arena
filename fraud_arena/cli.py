@@ -55,6 +55,8 @@ def pilot(a) -> int:
 
 def _player_runner(spec: str, a, user: str):
     kind, model = spec.split(":", 1)
+    if kind == "baseline":
+        return RUNNERS[kind](model)
     env = {"FA_GRAYSON_STATE": ".arena/grayson", "FA_GRAYSON_BUDGET": str(a.grayson_budget)}
     if kind == "claude-code" and os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
         env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]

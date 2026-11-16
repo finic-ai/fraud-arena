@@ -3,13 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# The defender role at each observed institution, as Fraud World declares it. Its analyst role (manual review
-# queues) keeps its built-in policy for now.
+# The defender role at each observed institution, and its manual review team (`analyst`, with a daily capacity),
+# as Fraud World declares them. A defender's bundle covers both: its detection decides at the gates, and its review
+# rules decide the cases its team reviews.
 INSTITUTIONS = {
-    "brindlemark": {"role": "brind_defender", "observer": "brindlemark"},
-    "dovrex": {"role": "dovrex_defender", "observer": "dovrex"},
-    "hopcrate": {"role": "hop_defender", "observer": "hopcrate"},
-    "kellmont": {"role": "kell_defender", "observer": "kellmont"},
+    "brindlemark": {"role": "brind_defender", "analyst": "brind_analyst", "observer": "brindlemark"},
+    "dovrex": {"role": "dovrex_defender", "analyst": "dovrex_analyst", "observer": "dovrex"},
+    "hopcrate": {"role": "hop_defender", "analyst": "hop_analyst", "observer": "hopcrate"},
+    "kellmont": {"role": "kell_defender", "analyst": "kell_analyst", "observer": "kellmont"},
 }
 
 
@@ -74,6 +75,11 @@ class EpisodeConfig:
     @property
     def role(self) -> str:
         return INSTITUTIONS[self.institution]["role"]
+
+    @property
+    def roles(self) -> list[str]:
+        i = INSTITUTIONS[self.institution]
+        return [i["role"]] + ([i["analyst"]] if i.get("analyst") else [])
 
     @property
     def observer(self) -> str:
