@@ -18,6 +18,10 @@ import duckdb
 
 from .config import ScoreWeights
 
+# Observed institutions that are merchants: they hand over goods, so a refund or chargeback of a fraudulent sale is
+# a loss whatever the sale brought in.
+MERCHANTS = ("hopcrate", "kellmont")
+
 ADVERSE = ("decline", "reject", "deny", "refuse", "step_up", "hold", "standard", "review", "raise_alert", "block", "restrict",
            "close_account")
 
@@ -63,11 +67,17 @@ def window_score(truth: Path, accounts_institution: Path, *, institution: str, r
         select p.time, pe.institution, coalesce(p.cause_scenario, ''), p.payee, -p.amount
         from '{T}/postings.parquet' p join owners pe on pe.entity = p.payee
         where p.cause_kind = 'scenario' and p.amount > 0""")
+    # A merchant's fraud inflow is the fraudulent sale itself, which a refund or chargeback pays back while the goods
+    # are gone: netting would cancel the merchant's real loss, so merchants' accounts count gross outflow.
+    merch = "(" + ", ".join(f"'{m}'" for m in MERCHANTS) + ")"
     rows = c.execute(f"""
         with acct as (
           select acct, any_value(institution) institution,
-                 greatest(sum(case when time < timestamptz '{end}' then amt else 0 end), 0)
-               - greatest(sum(case when time < timestamptz '{start}' then amt else 0 end), 0) loss
+                 case when any_value(institution) in {merch}
+                   then sum(case when amt > 0 and time >= timestamptz '{start}' and time < timestamptz '{end}'
+                                 then amt else 0 end)
+                   else greatest(sum(case when time < timestamptz '{end}' then amt else 0 end), 0)
+                      - greatest(sum(case when time < timestamptz '{start}' then amt else 0 end), 0) end loss
           from flows where acct not in (select subject from launder) group by acct),
         share as (
           select acct, scen, sum(amt) out from flows

@@ -290,3 +290,22 @@ def test_attacker_plans_are_capped_at_three_times_a_scheme():
     p = a.cap({"volume": 2.5, "tactics": {"ato_phishing": 3, "mule_flow": 1}})
     assert p["volume"] == 2.5 and p["tactics"]["ato_phishing"] == 1.2 and p["tactics"]["mule_flow"] == 1
     assert a.cap({"volume": 4})["volume"] == 3.0
+
+
+def test_merchant_chargebacks_are_losses_despite_the_fraudulent_sale(tmp_path):
+    from datetime import datetime, timezone
+    t = tmp_path / "truth"
+    t.mkdir()
+    when = [datetime(2026, 7, 1, tzinfo=timezone.utc), datetime(2026, 7, 20, tzinfo=timezone.utc)]
+    # A stolen card buys $100 at Kellmont; the issuer charges it back from Kellmont's account.
+    _write(t / "postings.parquet", {"key": ["e1", "e2"], "time": when, "payer": ["card_v", "kell_acct"],
+                                    "payee": ["kell_acct", "card_v"], "amount": [100.0, 100.0], "dirty": [0.0, 0.0],
+                                    "cause_kind": ["scenario", "scenario"], "cause_scenario": ["cnp_fraud", "cnp_fraud"]})
+    _write(t / "labels.parquet", {"label": ["cnp_fraud"], "subject": ["card_v"]})
+    _write(t / "events.parquet", {"key": ["e1"], "cause_kind": ["scenario"]})
+    _write(t / "decisions.parquet", {"key": ["z"], "time": when[:1], "role": ["r"], "action": ["approve"],
+                                     "decision": ["x"]})
+    _write(tmp_path / "owners.parquet", {"entity": ["card_v", "kell_acct"], "institution": ["arbelton", "kellmont"]})
+    kw = dict(role="r", start="2026-06-01T00:00:00Z", end="2026-08-01T00:00:00Z", weights=ScoreWeights())
+    k = window_score(t, tmp_path / "owners.parquet", institution="kellmont", **kw)
+    assert k.losses == 100.0 and k.losses_by_scenario == {"cnp_fraud": 100.0}
