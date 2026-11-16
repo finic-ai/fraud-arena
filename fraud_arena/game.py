@@ -30,7 +30,7 @@ from . import bundle as bundles
 from .config import INSTITUTIONS, EpisodeConfig, ScoreWeights
 from .episode import brief_text, EpisodeState
 from .runners import AgentRunner, UsageLimited
-from .scoring import paired, window_score
+from .scoring import paired, ring_score, window_score
 
 
 @dataclass
@@ -302,14 +302,19 @@ class Game:
             else:
                 base = self.ring_loss_at_start.get(p.target, {"observed": 0.0, "background": 0.0})
                 gl, rl = self.attacker.ring_loss(game, p.target), self.attacker.ring_loss(ref, p.target)
-                g = {k: gl[k] - base[k] for k in gl}
-                r = {k: rl[k] - base[k] for k in rl}
-                # Scored on the observed institutions only, where defenders play; background is displacement.
-                result["attackers"][p.name] = {"ring": p.target, "stolen": g["observed"],
-                                               "stolen_by_scripted_ring": r["observed"],
-                                               "vs_scripted": g["observed"] - r["observed"],
-                                               "background_stolen": g["background"],
-                                               "background_by_scripted_ring": r["background"]}
+                # Scored like the defenders are charged, on the observed institutions only: the losses and the mule
+                # flow (at its weight) of the postings the ring's operations caused. Background is displacement.
+                rid = self.ring_ids[p.target]
+                gs = ring_score(*exports["game"], ring=rid, institutions=list(INSTITUTIONS), start=start, end=end,
+                                weights=cfg.weights, number=p.target)
+                rs = ring_score(*exports["reference"], ring=rid, institutions=list(INSTITUTIONS), start=start,
+                                end=end, weights=cfg.weights, number=p.target)
+                result["attackers"][p.name] = {
+                    "ring": p.target, "score": gs["score"], "score_of_scripted_ring": rs["score"],
+                    "vs_scripted": gs["score"] - rs["score"], "game": gs, "reference": rs,
+                    "incident_losses_observed": gl["observed"] - base["observed"],
+                    "incident_losses_background": gl["background"] - base["background"],
+                    "scripted_incident_losses_background": rl["background"] - base["background"]}
         tokens = {}
         for t in self.turns:
             tokens.setdefault(t.player, {})

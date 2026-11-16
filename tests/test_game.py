@@ -40,7 +40,10 @@ class Engine:
                                  "amount": [loss, stolen], "dirty": [loss, stolen], "cause_kind": ["scenario"] * 2,
                                  "cause_scenario": ["ato", "ring_op"], "cause_instance": ["i0", "i1"]}),
                        t / "postings.parquet")
-        pq.write_table(pa.table({"instance": ["i0", "i1"], "anchor": ["x", "ring-7"]}), t / "instances.parquet")
+        pq.write_table(pa.table({"instance": ["i0", "i1"], "anchor": ["x", "ring-7"],
+                                 "scenario": ["ato", "r7_ach_return"]}), t / "instances.parquet")
+        pq.write_table(pa.table({"type": ["fraudster"], "entity": ["f9"], "attribute": ["ring"], "value": ["ring-7"]}),
+                       t / "hidden.parquet")
         pq.write_table(pa.table({"label": ["money_mule"], "subject": ["m"]}), t / "labels.parquet")
         pq.write_table(pa.table({"key": ["e1"], "cause_kind": ["scenario"]}), t / "events.parquet")
         pq.write_table(pa.table({"key": ["z"], "time": when[:1], "role": ["brind_defender"], "action": ["approve"],
@@ -85,8 +88,9 @@ def test_game_runs_defenders_and_attackers_together(tmp_path):
     assert [t["player"] for t in res["turns"]] == ["defender-brindlemark", "attacker-r7"] * 2
     assert res["defenders"]["defender-brindlemark"]["losses_prevented"] == 60.0
     a = res["attackers"]["attacker-r7"]
-    assert a["stolen"] == 80.0 and a["stolen_by_scripted_ring"] == 50.0 and a["vs_scripted"] == 30.0
-    assert a["background_stolen"] == 1000.0
+    # The fake truth: ring-7's instance i1 pays 80 (game) or 50 (reference) from a Dovrex account.
+    assert a["score"] == 80.0 and a["score_of_scripted_ring"] == 50.0 and a["vs_scripted"] == 30.0
+    assert a["incident_losses_background"] == 1000.0
     assert res["tokens"]["attacker-r7"]["output_tokens"] == 4
 
 

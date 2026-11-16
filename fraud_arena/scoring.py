@@ -97,7 +97,7 @@ def window_score(truth: Path, accounts_institution: Path, *, institution: str, r
                sum(case when labelled then out_e - out_s else least(in_e, out_e) - least(in_s, out_s) end)::double
         from a where institution not in {"(" + ", ".join(f"'{m}'" for m in MERCHANTS) + ")"} group by 1""").fetchall()
     mule = dict(mule_rows)
-    rows = list(rows) + merchant_losses(c, T, merch, start, end)
+    rows = list(rows) + merchant_losses(c, T, merch, start, end) + charge_offs(c, T)
     own, other, by_scenario = 0.0, 0.0, {}
     for inst, scen, amt in rows:
         if inst == institution:
@@ -120,6 +120,19 @@ def window_score(truth: Path, accounts_institution: Path, *, institution: str, r
             good += 1
             friction += weights.action_cost(action, amount)
     return WindowScore(own, friction, good, fraud, other, by_scenario, float(mule.get(institution) or 0.0))
+
+
+def charge_offs(c, T: str) -> list[tuple[str, str, float]]:
+    """An institution's charge-offs: what ring and mule accounts owe it when the run ends (an ACH return or a
+    chargeback reversing money they already moved on leaves them overdrawn). Their own flows are left out of the
+    netting, so this is the only place that loss shows. Earlier charge-offs are the same in the reference run."""
+    if not (Path(T) / "balances.parquet").exists():
+        return []
+    return c.execute(f"""
+        select o.institution, 'charge_off', sum(-b.closing)::double
+        from '{T}/balances.parquet' b join owners o on o.entity = b.entity
+        where b.closing < 0 and b.entity in (select subject from launder)
+        group by 1""").fetchall()
 
 
 def merchant_losses(c, T: str, merch: str, start: str, end: str) -> list[tuple[str, str, float]]:
@@ -194,3 +207,52 @@ def paired(candidate: WindowScore, reference: WindowScore, weights: ScoreWeights
     composite = (prevented + weights.mule_flow * mule - friction
                  - (displaced if weights.displacement_in_composite else 0.0))
     return PairedScore(prevented, friction, displaced, composite, mule, candidate, reference)
+
+
+def ring_score(truth: Path, owners: Path, *, ring: str, institutions, start: str, end: str,
+               weights: ScoreWeights, number: int | None = None) -> dict:
+    """What a ring inflicted on the observed institutions, by the defenders' own rules: the losses and the mule flow
+    (at its weight) of the postings its operations caused (instances anchored at the ring, its fraudsters or the
+    entities it controls), so the attacker's score mirrors what the defenders are charged. Background banks don't
+    count."""
+    import shutil
+    import tempfile
+    c = duckdb.connect()
+    T = str(truth)
+    # The ring's own schemes are named by its number (r1_bank_hopping); shared schemes (ring_mule_flow,
+    # ring_operation) are the ring's when their anchor is: the ring itself, an entity whose `ring` is it, or one that a
+    # fraudster of the ring operates, controls or recruited.
+    fraudsters = {e for (e,) in c.execute(f"""
+        select distinct entity from '{T}/hidden.parquet' where type = 'fraudster'
+          and attribute in ('ring', 'second_ring') and value = ?""", [ring]).fetchall()}
+    members = {ring} | fraudsters | {e for (e,) in c.execute(f"""
+        select distinct entity from '{T}/hidden.parquet'
+        where (attribute in ('ring', 'second_ring') and value = ?)
+           or (attribute in ('operator', 'controlled_by', 'recruited_by', 'fraudster', 'herder')
+               and value in (select unnest(?::varchar[])))""", [ring, sorted(fraudsters)]).fetchall()}
+    prefix = f"r{number}_" if number is not None else None
+    insts = {i for (i,) in c.execute(f"""
+        select instance from '{T}/instances.parquet'
+        where anchor in (select unnest(?::varchar[])) or (? is not null and starts_with(scenario, ?))""",
+                                     [sorted(members), prefix, prefix or ""]).fetchall()}
+    tmp = Path(tempfile.mkdtemp(prefix="ring-"))
+    try:
+        for f in Path(T).glob("*.parquet"):
+            (tmp / f.name).symlink_to(f.resolve())
+        (tmp / "postings.parquet").unlink()
+        if (tmp / "balances.parquet").exists():
+            (tmp / "balances.parquet").unlink()
+            c.execute(f"""copy (select * from '{T}/balances.parquet' where entity in (select unnest(?::varchar[])))
+                          to '{tmp}/balances.parquet' (format parquet)""", [sorted(members)])
+        c.execute(f"""copy (select * from '{T}/postings.parquet' where cause_instance in (select unnest(?::varchar[])))
+                      to '{tmp}/postings.parquet' (format parquet)""", [sorted(insts)])
+        per = {}
+        for inst in institutions:
+            w = window_score(tmp, owners, institution=inst, role="-", start=start, end=end, weights=weights)
+            per[inst] = {"losses": w.losses, "mule_flow": w.mule_flow}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    losses = sum(v["losses"] for v in per.values())
+    mule = sum(v["mule_flow"] for v in per.values())
+    return {"losses": losses, "mule_flow": mule, "score": losses + weights.mule_flow * mule,
+            "by_institution": per, "instances": len(insts)}
