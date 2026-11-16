@@ -72,7 +72,7 @@ external:
 Every case your rules hold (`hold`, `review`, ...) waits in `REVIEW_QUEUE` until a verdict or its due time. Grayson
 can work the queue for you: each simulated day it gets the pending cases (their `REVIEW_QUEUE` fields, nothing else)
 and its verdict (`release` or `reject`) is applied. Use either shape above; the actions are `release` and `reject`.
-It doesn't use your human team's capacity; you can still review cases yourself in `reviews.json`.
+It doesn't use your human team's capacity; you can still review cases yourself in `reviews.json`. Grayson looks at the queue every simulated hour and sees each case's `REVIEW_QUEUE` columns. For more context (the customer's history, notes, payees), work the queue from `workflow.py`'s `review(cases)` instead and send Grayson whatever case file you build.
 
 ```yaml
 review_queue:

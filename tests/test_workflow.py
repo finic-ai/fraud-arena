@@ -205,3 +205,107 @@ def test_rules_sending_cases_nowhere_are_refused(tmp_path):
     g = Game(cfg, E(), [d], tmp_path / "out", tmp_path / "sb", attacker_api=Attackers(), log=lambda r: None)
     res = g.run()
     assert "neither workflow.py" in res["turns"][0]["error"]
+
+
+class Queued(Gated):
+    """A review queue with two pending cases, worked through interventions; day is fractional (hourly steps)."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.cases = {"c1": {"id": "c1", "kind": "wire", "amount": 9000, "account": "a1", "case_no": "RV1",
+                             "institution": "i-brind", "manual_verdict": "pending"},
+                      "c2": {"id": "c2", "kind": "p2p", "amount": 40, "account": "a2", "case_no": "RV2",
+                             "institution": "i-brind", "manual_verdict": "pending"}}
+        self.marks = []
+
+    def run_until_day(self, d):
+        self.marks.append(d)
+        self.day = d
+        return 0
+
+    def rows(self, etype, attrs, where_attr=None, equals=None):
+        if etype == "institution":
+            return [{"id": "i-brind", "name": "brindlemark"}]
+        if etype == "account":
+            return [{"id": "a1", "number": "100001"}, {"id": "a2", "number": "100002"}]
+        if etype == "review_desk":
+            return [{"id": "desk", "name": "BRINDLEMARK"}]
+        rows = [dict(r) for r in self.cases.values()]
+        return [r for r in rows if where_attr is None or r.get(where_attr) == equals]
+
+    def intervene(self, etype, eid, attr, value):
+        if etype == "review_case":
+            self.cases[eid][attr] = value
+
+    def fork(self):
+        r = Queued(self.day, self.deployed, self.plans)
+        r.cases = {k: dict(v) for k, v in self.cases.items()}
+        return r
+
+
+class QEngine(Engine):
+    def start(self, cfg): return Queued()
+    def queue_columns(self, cfg):
+        return [("CASE_NO", ["case_no"], False), ("CASE_TYPE", ["kind"], True), ("AMT", ["amount"], False),
+                ("ACCT_NO", ["account", "number"], False)]
+    def spec(self, cfg): return {"entities": {"review_case": {"attributes": {"account": {"type": "ref", "entity": "account"}}}}}
+    def write_live(self, run, cfg, dest):
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "day.txt").write_text(str(run.day))
+
+
+def test_a_workflow_works_the_review_queue_hourly_with_queue_rows(tmp_path):
+    seen = tmp_path / "seen.jsonl"
+
+    def bundle(ws):
+        (ws / "bundle").mkdir(parents=True, exist_ok=True)
+        (ws / "bundle" / "policy.yaml").write_text("rules: []\n")
+        (ws / "bundle" / "workflow.py").write_text(f'''
+import json
+REVIEW_KINDS = ["wire"]
+def review(cases):
+    open({str(seen)!r}, "a").write(json.dumps(cases) + "\\n")
+    return ["reject" if c["AMT"] > 5000 else None for c in cases]
+''')
+
+    events = []
+    cfg = GameConfig(world=Path("w.yaml"), seed=1, start_day=180, period_days=1, horizon_days=1, settle_days=0)
+    d = Player("defender-brindlemark", "defender", "brindlemark", Scripted("claude-code", bundle))
+    g = Game(cfg, QEngine(), [d], tmp_path / "out", tmp_path / "sb", attacker_api=Attackers(), log=events.append)
+    g.run()
+    first = json.loads(seen.read_text().splitlines()[0])
+    assert first == [{"CASE_NO": "RV1", "CASE_TYPE": "WIRE", "AMT": 9000, "ACCT_NO": "100001"}]  # wire only, no ids
+    assert len(seen.read_text().splitlines()) == 1  # decided at the first hourly look, never asked again
+    assert (tmp_path / "sb" / "defender-brindlemark" / "workspace" / "live" / "day.txt").exists()
+    assert g.queue_stats["defender-brindlemark"]["decided"] == 1
+    assert not any(e.get("event") == "bundle_failed" for e in events)
+
+
+def test_queue_columns_show_what_the_observer_shows(tmp_path):
+    import yaml
+    from fraud_arena.engine import RunmereEngine
+    from fraud_arena.config import EpisodeConfig
+    w = tmp_path / "w.yaml"
+    w.write_text(yaml.safe_dump({
+        "entities": {"review_case": {"attributes": {
+            "case_no": {"type": "string", "visibility": "observable"},
+            "kind": {"type": "code", "visibility": "observable"},
+            "account": {"type": "ref", "visibility": "observable", "entity": "account"},
+            "party": {"type": "ref", "visibility": "hidden", "entity": "person"}}},
+            "account": {"attributes": {"number": {"type": "string", "visibility": "observable"},
+                                       "owner_secret": {"type": "string", "visibility": "hidden"}}},
+            "person": {"attributes": {"name": {"type": "string", "visibility": "observable"}}}},
+        "observers": {"brindlemark": {"tables": {"REVIEW_QUEUE": {"columns": {
+            "CASE_ID": {"source": {"kind": "key", "of": "review_case"}},
+            "CASE_NO": {"source": {"kind": "attribute", "of": "review_case.case_no"}},
+            "CASE_TYPE": {"source": {"kind": "attribute", "of": "review_case.kind", "transforms": ["upper"]}},
+            "ACCT_ID": {"source": {"kind": "attribute", "of": "review_case.account"}},
+            "ACCT_NO": {"source": {"kind": "attribute", "of": "review_case.account.number"}},
+            "SECRET": {"source": {"kind": "attribute", "of": "review_case.account.owner_secret"}},
+            "PARTY_NAME": {"source": {"kind": "attribute", "of": "review_case.party.name"}}}}}}}}))
+    eng = RunmereEngine.__new__(RunmereEngine)  # no runmere build needed to read the world's declarations
+    eng._specs = {}
+    cfg = EpisodeConfig(world=w, institution="brindlemark", seed=1)
+    cols = eng.queue_columns(cfg)
+    assert {c for c, _, _ in cols} == {"CASE_NO", "CASE_TYPE", "ACCT_NO"}  # no display ids, nothing hidden
+    assert dict((c, u) for c, _, u in cols)["CASE_TYPE"] is True

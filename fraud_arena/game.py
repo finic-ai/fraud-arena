@@ -117,6 +117,7 @@ class Game:
         self.wf_snap: dict[str, Path | None] = {}  # defender -> frozen bundle its workflow runs from
         self.good_wf_snap: dict[str, Path | None] = {}
         self.workflow_stats: dict[str, dict] = {}
+        self.queue_stats: dict[str, dict] = {}
         self.queue_grayson: dict[str, tuple[str, dict]] = {}  # defender -> (institution, grayson config)
         self.textgen = textgen if textgen is not None else _textgen(cfg, Path(out))
         self.briefs: dict[int, dict[str, str]] = {}  # ring -> scheme -> its attacker's latest brief
@@ -241,24 +242,39 @@ class Game:
         goes one simulated day at a time and each time it stops, the waiting cases go out in one batch per decision and
         their answers go back before it continues."""
         outside = bool(self.grayson_gates or self.workflow_dec) and hasattr(run, "pending_external")
-        if not outside and not self.queue_grayson:
+        if not outside and not self.queue_grayson and not self.workflows:
             run.run_until_day(day)
             return
         d = int(run.day)
         while d < day:
             d += 1
             self._day_stats = {"stops": 0, "workflow": 0, "grayson_asked": 0, "answered": 0, "defaulted": 0}
-            # The engine stops before the day whenever instant decisions (event gates) wait; each must be answered
-            # before it goes on, and nothing else may touch the run until it reaches the day.
-            while run.run_until_day(min(d, day)):
-                self._day_stats["stops"] += 1
-                self._answer_outside(run, d)
-            if outside:
-                self._answer_outside(run, d)  # cases waiting at state gates and after events
-            if self.queue_grayson:
-                self._grayson_queue(run, d)
+            # Review queues are worked every hour (held payments are often due within hours); otherwise whole days.
+            hourly = bool(self.queue_grayson) or any(w.reviews for w in self.workflows.values())
+            marks = [d - 1 + h / 24 for h in range(1, 24)] + [d] if hourly else [d]
+            for t in marks:
+                # The engine stops before `t` whenever instant decisions (event gates) wait; each must be answered
+                # before it goes on, and nothing else may touch the run until it reaches `t`.
+                while run.run_until_day(min(t, day)):
+                    self._day_stats["stops"] += 1
+                    self._answer_outside(run, d)
+                if outside:
+                    self._answer_outside(run, d)  # cases waiting at state gates and after events
+                if hourly:
+                    self._work_queues(run, t)
             if outside and self._day_stats["stops"] + self._day_stats["answered"]:
                 self.log({"event": "outside_decisions", "day": d, **self._day_stats})
+            if self.workflows and d < day:
+                self._write_live(run)
+
+    def _write_live(self, run) -> None:
+        """Defenders with a deployed workflow get their tables as of each day's end in `live/` (no free text)."""
+        for owner in self.workflows:
+            p = next(p for p in self.players if p.name == owner)
+            try:
+                self.engine.write_live(run, self.cfg.for_institution(p.target), self.workspace(p) / "live")
+            except Exception as e:
+                self.log({"event": "live_tables_failed", "player": owner, "error": str(e)[:200]})
 
     def _answer_outside(self, run, d: int) -> int:
         waiting = run.pending_external()
@@ -327,10 +343,14 @@ class Game:
                 continue
             outs = client.ask_many([r for *_, r in items])
             asked += len(items)
-            for (w, q, avail, _), o in zip(items, outs):
+            logged = []
+            for (w, q, avail, req), o in zip(items, outs):
                 act = grayson_action(q, w["features"], o.get("answers") or {}, avail)
+                logged.append({"where": w["decision"], "data": req["data"], "answers": o.get("answers"),
+                               "error": o.get("error"), "action": act})
                 if act:
                     answers.append((w["key"], act))
+            self._log_live(owner, float(run.day), logged)
         # An instant decision has no timeout: one nobody could answer (Grayson unreachable or undecided) takes the
         # gate's default, as a real gate fails open or closed to its default when its decision service is down.
         done = {k for k, _ in answers}
@@ -367,42 +387,101 @@ class Game:
         for dcs in wf.decisions:
             self.workflow_dec[dcs] = owner
 
-    def _grayson_queue(self, run, day: int) -> None:
-        """Grayson works a defender's review queue: each simulated day, the held cases still pending go to Grayson
-        with only their observable plain fields (the world's declarations), and its verdicts are set as the cases'
-        `manual_verdict`, as a human review's would be (it doesn't use the human team's capacity)."""
+    def _queue_cases(self, run, inst: str, kinds) -> list[dict]:
+        """The institution's pending review-queue cases, each as its `REVIEW_QUEUE` row shows it (every column the
+        world declares, except the observer's own display ids), plus `_id` for the harness."""
+        ecfg = self.cfg.for_institution(inst)
+        cols = self.engine.queue_columns(ecfg)
+        direct = sorted({p[0] for _, p, _ in cols} | {"kind"})
+        inst_id = {r["name"]: r["id"] for r in run.rows("institution", ["name"])}.get(inst)
+        rows = [r for r in run.rows("review_case", direct + ["institution", "manual_verdict"],
+                                    where_attr="manual_verdict", equals="pending")
+                if r.get("institution") == inst_id and (not kinds or r.get("kind") in kinds)]
+        if not rows:
+            return []
+        looked: dict[tuple[str, str], dict] = {}
+        world = self.engine.spec(ecfg)
+        rc = ((world.get("world") or world).get("entities") or {}).get("review_case", {}).get("attributes", {})
+        for _, path, _ in cols:
+            if len(path) == 2 and (path[0], path[1]) not in looked:
+                etype = rc[path[0]]["entity"]
+                looked[(path[0], path[1])] = {e["id"]: e.get(path[1]) for e in run.rows(etype, [path[1]])}
+        cases = []
+        for r in rows:
+            c = {"_id": r["id"]}
+            for col, path, upper in cols:
+                v = r.get(path[0]) if len(path) == 1 else looked[(path[0], path[1])].get(r.get(path[0]))
+                if v is None:
+                    continue
+                c[col] = str(v).upper() if upper and isinstance(v, str) else v
+            cases.append(json.loads(json.dumps(c, default=str)))
+        return cases
+
+    def _log_live(self, owner: str, day: float, rows: list[dict]) -> None:
+        """What live Grayson was sent and answered (grader side; each defender gets its own at the next boundary)."""
+        if not rows:
+            return
+        f = self.out / "grayson-live" / f"{owner}.jsonl"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with open(f, "a") as fh:
+            for r in rows:
+                fh.write(json.dumps({"day": round(day, 4)} | r, default=str) + "\n")
+
+    def _work_queues(self, run, day: float) -> None:
+        """Each defender's review queue, worked by Grayson (a `review_queue.grayson` config) or by its workflow's
+        `review(cases)`: verdicts are set as the cases' `manual_verdict`, as a human review's would be (they don't
+        use the human team's capacity)."""
         from .bundle import grayson_action
-        for owner, (inst, q) in self.queue_grayson.items():
-            ecfg = self.cfg.for_institution(inst)
-            fields = [f for f in self.engine.observable_scalars(ecfg, "review_case") if f != "manual_verdict"]
-            inst_id = {r["name"]: r["id"] for r in run.rows("institution", ["name"])}.get(inst)
-            cases = [r for r in run.rows("review_case", fields + ["institution", "manual_verdict"],
-                                         where_attr="manual_verdict", equals="pending")
-                     if r.get("institution") == inst_id and (not q["kinds"] or r.get("kind") in q["kinds"])]
+        from .workflow import WorkflowError
+        for owner, (inst, q) in list(self.queue_grayson.items()):
+            cases = self._queue_cases(run, inst, q["kinds"])
             if not cases:
                 continue
-            reqs = []
-            for r in cases:
-                data = {k: r.get(k) for k in fields if r.get(k) is not None}
-                if "questions" in q:
-                    questions = {n: {"type": "choice", "instructions": v["instructions"], "criteria": v["criteria"]}
-                                 for n, v in q["questions"].items()}
-                else:
-                    questions = {"decision": {"type": "choice", "instructions": q["instructions"],
-                                              "criteria": {a: m for a, m in q["criteria"].items()
-                                                           if a in ("release", "reject")}}}
-                reqs.append({"data": json.loads(json.dumps(data, default=str)), "questions": questions})
             client = self.broker.client(owner)
             if client is None:
                 continue
+            if "questions" in q:
+                questions = {n: {"type": "choice", "instructions": v["instructions"], "criteria": v["criteria"]}
+                             for n, v in q["questions"].items()}
+            else:
+                questions = {"decision": {"type": "choice", "instructions": q["instructions"],
+                                          "criteria": {a: m for a, m in q["criteria"].items()
+                                                       if a in ("release", "reject")}}}
+            reqs = [{"data": {k: v for k, v in c.items() if k != "_id"}, "questions": questions} for c in cases]
             outs = client.ask_many(reqs)
-            done = 0
-            for r, req, o in zip(cases, reqs, outs):
+            done, logged = 0, []
+            for c, req, o in zip(cases, reqs, outs):
                 act = grayson_action(q, req["data"], o.get("answers") or {}, ["release", "reject"])
+                logged.append({"where": "review_queue", "case": c.get("CASE_NO"), "data": req["data"],
+                               "answers": o.get("answers"), "error": o.get("error"), "verdict": act})
                 if act:
-                    run.intervene("review_case", r["id"], "manual_verdict", act)
+                    run.intervene("review_case", c["_id"], "manual_verdict", act)
                     done += 1
-            self.log({"event": "grayson_queue", "player": owner, "day": day, "cases": len(cases), "decided": done})
+            self._log_live(owner, day, logged)
+            self._queue_stats(owner, len(cases), done)
+        for owner, wf in list(self.workflows.items()):
+            if not wf.reviews:
+                continue
+            p = next(p for p in self.players if p.name == owner)
+            cases = self._queue_cases(run, p.target, wf.review_kinds)
+            if not cases:
+                continue
+            try:
+                acts = wf.review([{k: v for k, v in c.items() if k != "_id"} for c in cases])
+            except WorkflowError as e:
+                raise ValueError(f"review_queue: {e}") from None
+            done = 0
+            for c, act in zip(cases, acts):
+                if act:
+                    run.intervene("review_case", c["_id"], "manual_verdict", act)
+                    done += 1
+            self._queue_stats(owner, len(cases), done)
+
+    def _queue_stats(self, owner: str, seen: int, decided: int) -> None:
+        st = self.queue_stats.setdefault(owner, {"looks": 0, "case_looks": 0, "decided": 0})
+        st["looks"] += 1
+        st["case_looks"] += seen
+        st["decided"] += decided
 
     def _period(self, game, b: int, first: bool) -> list[Turn]:
         if self.textgen is not None:
@@ -438,6 +517,10 @@ class Game:
                     "capacity_this_period": REVIEWS_PER_DAY[p.target] * cfg.period_days,
                     "last_period": self.review_feedback.get(p.name, {"applied": 0, "refused": []})}
             self.last_tables[p.name] = data
+            live_log = self.out / "grayson-live" / f"{p.name}.jsonl"
+            if live_log.exists():
+                (ws / ".arena").mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(live_log, ws / ".arena" / "grayson-live.jsonl")
             prompt = brief_text(ecfg, b, outcomes, st, first=first, families=self.engine.fraud_families(ecfg))
             self.engine.write_tables(game, ecfg, tag=p.name)
             return prompt, (lambda: self.engine.tool_server(game, ecfg, workspace=ws, tag=p.name))
@@ -498,10 +581,15 @@ class Game:
                                              env=self.broker.env(p.name), timeout_s=self.cfg.workflow_timeout_s)
                         except WorkflowError as e:
                             raise bundles.BundleError(str(e)) from None
-                        claimed = probe.decisions
+                        claimed, reviews = probe.decisions, probe.reviews
                         probe.close()
                         bad = [d for d in claimed if d not in decisions]
-                        if bad or not claimed:
+                        if reviews and (bun.policy.get("review_queue") or {}).get("grayson"):
+                            raise bundles.BundleError("the review queue is worked by workflow.py's review() and by a "
+                                                      "review_queue grayson config; pick one")
+                        if reviews and p.name not in self.review_on:
+                            raise bundles.BundleError("review() needs manual review, which isn't on in this game")
+                        if bad or not (claimed or reviews):
                             raise bundles.BundleError(
                                 f"workflow.py DECISIONS {bad or claimed} aren't this role's decision points: "
                                 f"{sorted(decisions)}")
@@ -540,6 +628,8 @@ class Game:
                             game.undeploy(role)
                             del self.deployed[role]
                     self._set_workflow(p.name, snap)
+                    if snap is not None:
+                        self.engine.write_live(game, ecfg, self.workspace(p) / "live")
                     keep = self.out / "bundles" / f"{p.name}-{b}-{digest[:12]}.json"
                     keep.parent.mkdir(parents=True, exist_ok=True)
                     keep.write_text(json.dumps({"policy": bun.policy, "notes": bun.notes,
@@ -657,7 +747,8 @@ class Game:
                         cached_ = json.loads(line).get("cached")
                         paid, cached = paid + (not cached_), cached + bool(cached_)
             wf = self.workflow_stats.get(p.name)
-            out[p.name] = {"workflow": wf and wf | {"seconds": round(wf["seconds"], 1)}, "grayson_calls": paid,
+            out[p.name] = {"workflow": wf and wf | {"seconds": round(wf["seconds"], 1)},
+                           "review_queue": self.queue_stats.get(p.name), "grayson_calls": paid,
                            "grayson_cached": cached}
         return out
 

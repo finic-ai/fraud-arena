@@ -66,15 +66,20 @@ class EpisodeState:
 
 
 WORKFLOW_SECTION = """Or decide in your own code: `bundle/workflow.py` with `DECISIONS = [...]` (the decision points it decides) and
-`def decide(decision, cases) -> list[str]`. Each simulated step, every case at those decision points comes to it in
-one batch: each case is the decision's observation features plus `_actions`, the actions allowed; return one action
-per case, in order. Arrange rules, models{wf_grayson} however you like; module-level code runs once (load your
-models there). It runs as you, from a copy of `bundle/` taken at deploy, in this workspace, without network{wf_net}.
-A decision point it claims with no rule of yours in `policy.yaml` sends every case to it; your own rules with
-`action: external` send it only the cases they match (the rest decided by your rules). Keep it fast: tens of thousands
-of cases a week. A crash, a timeout (10 minutes per batch) or an action not allowed takes the bundle back, as a rule
-failing at run time does. Test it first: `fa-workflow cases.jsonl --decision <d>`. What it prints goes to
-`.arena/workflow.log`."""
+`def decide(decision, cases) -> list[str]`. Each time cases wait at those decision points (the world stops at the
+minute they happen), they come to it in one batch: each case is the decision's observation features plus `_actions`,
+the actions allowed; return one action per case, in order. It can also work your review queue: `def review(cases)
+-> list` gets, every simulated hour, the pending cases (of `REVIEW_KINDS = [...]` if you set it), each with its
+`REVIEW_QUEUE` columns, and returns `release`, `reject` or None (leave it for later) per case. Arrange rules,
+models{wf_grayson} however you like, with any context you choose: your tables as of each day's end are in `live/`
+(the boundary's tables, minus free-text columns, which are only refreshed at boundaries), and module-level code runs
+once (load your models there). It runs as you, from a copy of `bundle/` taken at deploy, in this workspace, without
+network{wf_net}. A decision point it claims with no rule of yours in `policy.yaml` sends every case to it; your own
+rules with `action: external` send it only the cases they match (the rest decided by your rules). Keep it fast:
+tens of thousands of cases a week. A crash, a timeout (10 minutes per batch) or an answer not allowed takes the
+bundle back, as a rule failing at run time does. Test it first: `fa-workflow cases.jsonl --decision <d>`. What it
+prints goes to `.arena/workflow.log`; what live Grayson was sent and answered for you is in
+`.arena/grayson-live.jsonl`."""
 
 
 def brief_text(cfg: EpisodeConfig, boundary: int, outcomes: dict, state: EpisodeState, *, first: bool,

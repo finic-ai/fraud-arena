@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -120,6 +121,69 @@ class RunmereEngine:
             except Exception:  # a world without a public observer
                 pass
         return data
+
+    def text_columns(self, cfg) -> dict[str, set[str]]:
+        """The institution's free-text columns (`logical: text`), per table."""
+        obs = ((self.spec(cfg).get("observers") or {}).get(cfg.observer) or {}).get("tables") or {}
+        return {t: {c for c, v in ((spec or {}).get("columns") or {}).items() if (v or {}).get("logical") == "text"}
+                for t, spec in obs.items()}
+
+    def queue_columns(self, cfg) -> list[tuple[str, list[str], bool]]:
+        """The institution's `REVIEW_QUEUE` columns a review-queue case can carry as the observer shows them:
+        (column, attribute path from `review_case`, upper-cased). Columns that show a bare ref (the observer's own
+        display ids) are left out: only the observer's render assigns those."""
+        world = self.spec(cfg)
+        ents = (world.get("world") or world).get("entities") or {}
+        rc = (ents.get("review_case") or {}).get("attributes") or {}
+        table = ((((world.get("observers") or {}).get(cfg.observer) or {}).get("tables") or {})
+                 .get("REVIEW_QUEUE") or {}).get("columns") or {}
+        out = []
+        for col, spec in table.items():
+            src = (spec or {}).get("source") or {}
+            of = str(src.get("of", ""))
+            if src.get("kind") != "attribute" or not of.startswith("review_case."):
+                continue
+            path = of.split(".")[1:]
+            a = rc.get(path[0]) or {}
+            if a.get("visibility", "observable") != "observable":
+                continue
+            if len(path) == 1 and a.get("type") == "ref":
+                continue
+            if len(path) == 2:
+                if a.get("type") != "ref":
+                    continue
+                t = ((ents.get(a.get("entity")) or {}).get("attributes") or {}).get(path[1]) or {}
+                if t.get("visibility", "observable") != "observable" or t.get("type") == "ref":
+                    continue
+            elif len(path) > 2:
+                continue
+            out.append((col, path, "upper" in (src.get("transforms") or [])))
+        return out
+
+    def write_live(self, run, cfg, dest: Path) -> None:
+        """The institution's tables as of now, for a deployed workflow to read mid-period (`live/` in the workspace),
+        without their free-text columns: those are rewritten (model-written text) only at period boundaries, so the
+        raw world text never reaches a player."""
+        tmp = dest.with_name(dest.name + ".tmp")
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True)
+        run.write_observer(cfg.observer, str(tmp))
+        text = self.text_columns(cfg)
+        for f in tmp.glob("*.parquet"):
+            drop = text.get(f.stem) or set()
+            if drop:
+                t = pq.read_table(f)
+                keep = [c for c in t.column_names if c not in drop]
+                if len(keep) != len(t.column_names):
+                    pq.write_table(t.select(keep), f)
+        for p in [tmp, *tmp.rglob("*")]:
+            os.chmod(p, 0o755 if p.is_dir() else 0o644)
+        old = dest.with_name(dest.name + ".old")
+        shutil.rmtree(old, ignore_errors=True)
+        if dest.exists():
+            dest.rename(old)
+        tmp.rename(dest)
+        shutil.rmtree(old, ignore_errors=True)
 
     @contextmanager
     def tool_server(self, run, cfg, *, workspace: Path | None = None, tag: str | None = None):

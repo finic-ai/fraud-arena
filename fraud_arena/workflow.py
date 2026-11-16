@@ -10,6 +10,8 @@ Grayson calls in whatever arrangement it likes.
         # return one action per case, in order
         ...
 
+Optionally `def review(cases) -> list[str | None]` works the review queue (every hour, the pending cases of
+`REVIEW_KINDS`, or all): `release`, `reject` or None (leave it for later); each case has the queue row's fields.
 Module-level code runs once when the workflow starts (load models there). `fraud_arena.grayson.make_client()` gives
 a Grayson client on the defender's budget. The workflow runs as the defender's sandbox user, from a frozen copy of the
 bundle, with the workspace as its working directory; what it prints goes to `.arena/workflow.log`.
@@ -63,6 +65,8 @@ class Workflow:
             self.close()
             raise WorkflowError(f"workflow.py didn't start: {ready['error']}")
         self.decisions = [str(d) for d in ready.get("decisions") or []]
+        self.reviews = bool(ready.get("review"))
+        self.review_kinds = [str(k) for k in ready.get("review_kinds") or []]
 
     def _read(self, timeout: float) -> dict:
         r, _, _ = select.select([self.proc.stdout], [], [], timeout)
@@ -96,6 +100,26 @@ class Workflow:
             self.seconds = time.monotonic() - t0
         return out
 
+    def review(self, cases: list[dict]) -> list[str | None]:
+        """Its verdicts on review-queue cases: `release`, `reject`, or None to leave a case for later."""
+        out: list[str | None] = []
+        for i in range(0, len(cases), MAX_CASES_PER_CALL):
+            chunk = cases[i:i + MAX_CASES_PER_CALL]
+            self.proc.stdin.write(json.dumps({"review": chunk}, default=str) + "\n")
+            self.proc.stdin.flush()
+            msg = self._read(self.timeout_s)
+            if "error" in msg:
+                raise WorkflowError(f"workflow.py failed in review(): {msg['error']}")
+            acts = msg.get("actions")
+            if not isinstance(acts, list) or len(acts) != len(chunk):
+                raise WorkflowError(f"review() returned {len(acts) if isinstance(acts, list) else acts!r} "
+                                    f"verdicts for {len(chunk)} cases")
+            bad = [a for a in acts if a not in ("release", "reject", None)]
+            if bad:
+                raise WorkflowError(f"review() verdicts are release, reject or None, not {bad[0]!r}")
+            out += acts
+        return out
+
     def close(self) -> None:
         if self.proc.poll() is None:
             try:
@@ -122,9 +146,13 @@ def _host(path: str) -> int:
         mod = importlib.util.module_from_spec(spec)
         sys.path.insert(0, str(Path(path).parent))
         spec.loader.exec_module(mod)
-        if not callable(getattr(mod, "decide", None)):
-            raise TypeError("workflow.py has no decide(decision, cases) function")
-        send({"decisions": list(getattr(mod, "DECISIONS", []))})
+        has_review = callable(getattr(mod, "review", None))
+        if not callable(getattr(mod, "decide", None)) and not has_review:
+            raise TypeError("workflow.py has neither decide(decision, cases) nor review(cases)")
+        if getattr(mod, "DECISIONS", None) and not callable(getattr(mod, "decide", None)):
+            raise TypeError("workflow.py lists DECISIONS but has no decide(decision, cases)")
+        send({"decisions": list(getattr(mod, "DECISIONS", [])), "review": has_review,
+              "review_kinds": list(getattr(mod, "REVIEW_KINDS", []))})
     except Exception as e:
         traceback.print_exc()
         send({"error": f"{type(e).__name__}: {e}; traceback in .arena/workflow.log"})
@@ -132,8 +160,12 @@ def _host(path: str) -> int:
     for line in sys.stdin:
         msg = json.loads(line)
         try:
-            acts = mod.decide(msg["decision"], msg["cases"])
-            send({"actions": [str(a) for a in acts]})
+            if "review" in msg:
+                acts = mod.review(msg["review"])
+                send({"actions": [None if a is None else str(a) for a in acts]})
+            else:
+                acts = mod.decide(msg["decision"], msg["cases"])
+                send({"actions": [str(a) for a in acts]})
         except Exception as e:
             traceback.print_exc()
             send({"error": f"{type(e).__name__}: {e}; traceback in .arena/workflow.log"})
