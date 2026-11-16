@@ -93,6 +93,31 @@ def external_rule(decision: str) -> dict:
     return {"decision": decision, "action": "external"}
 
 
+def deploy_external(run, role: str, dep: dict, default_timeout: str = "1d") -> dict:
+    """Deploys `dep`, fitting each `external` entry to its gate as the engine asks: an event gate's cases stop the run
+    and take no `timeout`; a waiting case (state gate, after-event decision) needs one. Returns what was deployed."""
+    import re
+    dep = json.loads(json.dumps(dep))
+    for _ in range(3):
+        try:
+            run.deploy(role, dep)
+            return dep
+        except ValueError as e:
+            msg, fixed = str(e), False
+            for d in re.findall(r"`(\w+)` is an event gate", msg):
+                if "timeout" in dep.get("external", {}).get(d, {}):
+                    del dep["external"][d]["timeout"]
+                    fixed = True
+            for d in re.findall(r"`(\w+)` waits for an outside answer, so it needs a `timeout`", msg):
+                if d in dep.get("external", {}):
+                    dep["external"][d]["timeout"] = default_timeout
+                    fixed = True
+            if not fixed:
+                raise
+    run.deploy(role, dep)
+    return dep
+
+
 def take_grayson(policy: dict) -> dict[str, dict]:
     """Grayson at the gates: a deployment's `external: {<decision>: {timeout, grayson: {...}}}` sends that decision's
     waiting cases to Grayson, answered by the harness at the end of each simulated day. The engine sees only the

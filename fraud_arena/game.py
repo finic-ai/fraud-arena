@@ -247,14 +247,18 @@ class Game:
         d = int(run.day)
         while d < day:
             d += 1
-            run.run_until_day(min(d, day))
+            self._day_stats = {"stops": 0, "workflow": 0, "grayson_asked": 0, "answered": 0, "defaulted": 0}
+            # The engine stops before the day whenever instant decisions (event gates) wait; each must be answered
+            # before it goes on, and nothing else may touch the run until it reaches the day.
+            while run.run_until_day(min(d, day)):
+                self._day_stats["stops"] += 1
+                self._answer_outside(run, d)
+            if outside:
+                self._answer_outside(run, d)  # cases waiting at state gates and after events
             if self.queue_grayson:
                 self._grayson_queue(run, d)
-            for _ in range(100000):
-                if not outside or not self._answer_outside(run, d):
-                    break
-                if int(run.day) < min(d, day):
-                    run.run_until_day(min(d, day))
+            if outside and self._day_stats["stops"] + self._day_stats["answered"]:
+                self.log({"event": "outside_decisions", "day": d, **self._day_stats})
 
     def _answer_outside(self, run, d: int) -> int:
         waiting = run.pending_external()
@@ -309,10 +313,20 @@ class Game:
                 act = grayson_action(q, w["features"], o.get("answers") or {}, avail)
                 if act:
                     answers.append((w["key"], act))
+        # An instant decision has no timeout: one nobody could answer (Grayson unreachable or undecided) takes the
+        # gate's default, as a real gate fails open or closed to its default when its decision service is down.
+        done = {k for k, _ in answers}
+        defaulted = [(w["key"], w["default_action"]) for w in waiting
+                     if w.get("gate") == "event" and w["key"] not in done and w.get("default_action")]
+        answers += defaulted
         if answers:
             run.answer_external(answers)
-        self.log({"event": "outside_decisions", "day": d, "workflow": sum(len(v) for v in by_wf.values()),
-                  "grayson_asked": asked, "answered": len(answers)})
+        st = getattr(self, "_day_stats", None)
+        if st is not None:
+            st["workflow"] += sum(len(v) for v in by_wf.values())
+            st["grayson_asked"] += asked
+            st["answered"] += len(answers)
+            st["defaulted"] += len(defaulted)
         return len(answers)
 
     def _set_workflow(self, owner: str, snap: Path | None) -> None:
@@ -479,6 +493,14 @@ class Game:
                         ruled = {r["decision"] for r in policy.get("rules", [])}
                         policy["rules"] = list(policy.get("rules", [])) + [
                             bundles.external_rule(d) for d in claimed if d not in ruled]
+                    sent_out = {r["decision"] for r in policy.get("rules", []) if r.get("action") == "external"}
+                    orphans = sorted(sent_out - set(claimed) - set(gray))
+                    if orphans:
+                        raise bundles.BundleError(
+                            f"rules send {orphans} to `external`, but neither workflow.py (DECISIONS) nor a grayson "
+                            f"config decides them")
+                    for d in sent_out:
+                        policy.setdefault("external", {}).setdefault(d, {})
                     for decision in [d for d, o in self.grayson_gates.items() if o[0] == p.name]:
                         del self.grayson_gates[decision]
                     for decision, q in gray.items():
@@ -495,8 +517,7 @@ class Game:
                     for role in [r for r in ecfg.roles if r in set(role_of.values())]:
                         self.owner_of_role[role] = p.name
                         if role in parts:
-                            game.deploy(role, parts[role])
-                            self.deployed[role] = parts[role]
+                            self.deployed[role] = bundles.deploy_external(game, role, parts[role])
                         elif role in self.deployed:
                             game.undeploy(role)
                             del self.deployed[role]

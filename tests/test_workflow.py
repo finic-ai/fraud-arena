@@ -87,27 +87,34 @@ class Gated(Run):
 
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
-        self.waiting, self.answers = [], []
+        self.waiting, self.answers, self.ran = [], [], {}
 
     def run_until_day(self, d):
+        """As the engine does: stops before `d` with event-gate cases waiting (returns how many), refuses to go on
+        while any is unanswered, and returns 0 at `d`."""
+        if self.waiting:
+            raise ValueError(f"{len(self.waiting)} event gate case(s) wait for an outside answer")
         while self.day < d:
-            if self.waiting:
-                return
+            if self.ran.get(self.day + 1) is None and "external" in json.dumps(self.deployed.get("brind_defender", {})):
+                self.ran[self.day + 1] = True
+                self.waiting = [{"key": f"k{self.day + 1}-{i}", "decision": "brind_card_auth", "gate": "event",
+                                 "actions": ["approve", "decline"], "default_action": "approve",
+                                 "features": {"amount": a}} for i, a in enumerate(self.AMOUNTS)]
+                return len(self.waiting)
             self.day += 1
-            if "external" in json.dumps(self.deployed.get("brind_defender", {})):
-                self.waiting = [{"key": f"k{self.day}-{i}", "decision": "brind_card_auth",
-                                 "actions": ["approve", "decline"], "features": {"amount": a}}
-                                for i, a in enumerate(self.AMOUNTS)]
+        return 0
 
     def pending_external(self): return list(self.waiting)
 
     def answer_external(self, answers):
+        keys = {k for k, _ in answers}
+        assert all(w["key"] in keys for w in self.waiting), "every event-gate case needs an answer"
         self.answers += answers
         self.waiting = []
 
     def fork(self):
         r = Gated(self.day, self.deployed, self.plans)
-        r.answers = list(self.answers)
+        r.answers, r.ran, r.waiting = list(self.answers), dict(self.ran), list(self.waiting)
         return r
 
     def undeploy(self, role): self.deployed.pop(role, None)
@@ -128,6 +135,7 @@ def test_the_game_runs_a_defenders_workflow_at_its_gates(tmp_path):
     g = Game(cfg, E(), [d], tmp_path / "out", tmp_path / "sb", attacker_api=Attackers(), log=events.append)
     res = g.run()
     assert g.deployed["brind_defender"]["rules"] == [{"decision": "brind_card_auth", "action": "external"}]
+    assert g.deployed["brind_defender"]["external"] == {"brind_card_auth": {}}
     wf = res["decisioning"]["defender-brindlemark"]["workflow"]
     assert wf["cases"] == 12 and wf["actions"] == {"brind_card_auth:approve": 6, "brind_card_auth:decline": 6}
 
@@ -165,3 +173,35 @@ def test_no_grayson_game_refuses_grayson_gates_and_says_so(tmp_path):
     on = brief_text(GameConfig(world=Path("w.yaml"), seed=1).for_institution("brindlemark"), 180, {},
                     EpisodeState(), first=True)
     assert "50000 calls this period" in on and "workflow.py" in on
+
+
+def test_external_entries_fit_their_gate_kind():
+    from fraud_arena.bundle import deploy_external
+
+    class R:
+        def deploy(self, role, dep):
+            ext = dep.get("external", {})
+            if "timeout" in ext.get("card", {}):
+                raise ValueError("external.card.timeout: `card` is an event gate: its cases stop the run until they "
+                                 "are answered, so they have no timeout")
+            if "timeout" not in ext.get("alert", {"timeout": 1}):
+                raise ValueError("external.alert: `alert` waits for an outside answer, so it needs a `timeout`")
+            self.dep = dep
+    r = R()
+    out = deploy_external(r, "x", {"rules": [], "external": {"card": {"timeout": "2d"}, "alert": {}}})
+    assert out["external"] == {"card": {}, "alert": {"timeout": "1d"}} and r.dep == out
+
+
+def test_rules_sending_cases_nowhere_are_refused(tmp_path):
+    class E(Engine):
+        def start(self, cfg): return Gated()
+
+    def bundle(ws):
+        (ws / "bundle").mkdir(parents=True, exist_ok=True)
+        (ws / "bundle" / "policy.yaml").write_text("rules: [{decision: brind_card_auth, action: external}]\n")
+
+    cfg = GameConfig(world=Path("w.yaml"), seed=1, start_day=180, period_days=3, horizon_days=3, settle_days=0)
+    d = Player("defender-brindlemark", "defender", "brindlemark", Scripted("claude-code", bundle))
+    g = Game(cfg, E(), [d], tmp_path / "out", tmp_path / "sb", attacker_api=Attackers(), log=lambda r: None)
+    res = g.run()
+    assert "neither workflow.py" in res["turns"][0]["error"]
