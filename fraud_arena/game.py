@@ -100,6 +100,8 @@ class Game:
         self.role_of_decision: dict[str, str] = {}
         self.owner_of_role: dict[str, str] = {}
         self.last_tables: dict[str, Path] = {}
+        self.grayson_gates: dict[str, tuple[str, dict]] = {}  # decision -> (defender, question)
+        self.grayson_live: dict[str, object] = {}
         self.textgen = textgen if textgen is not None else _textgen(cfg, Path(out))
         from .review import Reviewer
         self.reviewer = Reviewer()
@@ -149,6 +151,8 @@ class Game:
         bounds = cfg.boundaries()
         for i in range(len(bounds) - 1):
             b, nxt = bounds[i], bounds[i + 1]
+            for c_ in self.grayson_live.values():
+                c_.reset_period()
             turns = self._period(game, b, first=(i == 0))
             self.turns += turns
             for t in turns:
@@ -173,7 +177,7 @@ class Game:
         for _ in range(len(self.deployed) + 2):
             trial = game.fork()
             try:
-                trial.run_until_day(day)
+                self._run_with_grayson(trial, day)
             except ValueError as e:
                 decision = str(e).split(":", 1)[0].strip()
                 role = self.role_of_decision.get(decision)
@@ -194,6 +198,48 @@ class Game:
             self.good.update(self.deployed)
             return trial
         raise RuntimeError(f"the game run can't advance to day {day}")
+
+    def _run_with_grayson(self, run, day: int) -> None:
+        """Runs to `day`. When a defender sends a decision to Grayson (`external` with a `grayson` question), the run
+        goes one simulated day at a time and the cases waiting at each day's end go to Grayson in one batch."""
+        if not self.grayson_gates or not hasattr(run, "pending_external"):
+            run.run_until_day(day)
+            return
+        from .grayson import GraysonClient
+        d = int(run.day)
+        while d < day:
+            d += 1
+            run.run_until_day(min(d, day))
+            waiting = [w for w in run.pending_external() if w["decision"] in self.grayson_gates]
+            if not waiting:
+                continue
+            reqs, keys = [], []
+            for w in waiting:
+                owner, q = self.grayson_gates[w["decision"]]
+                crit = {a: m for a, m in q["criteria"].items() if a in (w.get("available") or w["actions"])}
+                if not crit:
+                    continue
+                reqs.append((owner, {"data": w["features"] | {"decision": w["decision"]},
+                                     "questions": {"decision": {"type": "choice", "instructions": q["instructions"],
+                                                                "criteria": crit}}}))
+                keys.append(w["key"])
+            answers = []
+            by_owner: dict[str, list] = {}
+            for (owner, r), k in zip(reqs, keys):
+                by_owner.setdefault(owner, []).append((k, r))
+            for owner, items in by_owner.items():
+                client = self.grayson_live.get(owner)
+                if client is None:
+                    client = self.grayson_live[owner] = GraysonClient(
+                        self.out / "grayson-live" / owner, budget=self.cfg.grayson_calls_per_period)
+                outs = client.ask_many([r for _, r in items])
+                for (k, _), o in zip(items, outs):
+                    choice = ((o.get("answers") or {}).get("decision") or {}).get("choice")
+                    if choice:
+                        answers.append((k, choice))
+            if answers:
+                run.answer_external(answers)
+            self.log({"event": "grayson_live", "day": d, "asked": len(reqs), "answered": len(answers)})
 
     def _period(self, game, b: int, first: bool) -> list[Turn]:
         jobs = [(p, self._prepare(game, p, b, first)) for p in self.players]
@@ -267,7 +313,13 @@ class Game:
                                    decisions=self.engine.decisions_of(ecfg))
                 if bun.digest != st.last_deploy:
                     role_of = self.engine.role_of(ecfg)
-                    parts = bundles.split_by_role(bun.policy, role_of)
+                    policy = json.loads(json.dumps(bun.policy))
+                    gray = bundles.take_grayson(policy)
+                    for decision in [d for d, o in self.grayson_gates.items() if o[0] == p.name]:
+                        del self.grayson_gates[decision]
+                    for decision, q in gray.items():
+                        self.grayson_gates[decision] = (p.name, q)
+                    parts = bundles.split_by_role(policy, role_of)
                     self.role_of_decision.update(role_of)
                     for role in [r for r in ecfg.roles if r in set(role_of.values())]:
                         self.owner_of_role[role] = p.name

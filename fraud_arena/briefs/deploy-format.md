@@ -28,3 +28,22 @@ models:
 - The policy is checked when it is deployed; an error comes back to you at the next boundary and your previous bundle
   stays in place. Validate locally first: every rule's decision must be one of `decision_points`, every action one of
   that decision's actions, every feature one of its features.
+
+## Grayson at a gate (optional)
+
+A decision your bundle can't decide well by rule may wait for Grayson: route it with `action: external` and give the
+question. The case waits (as a held case does) until Grayson answers at the end of that simulated day, or takes the
+decision's default after `timeout`. Works for held cases and reviews (state gates), not for instant ones like card
+authorizations. Grayson sees the decision's observation features.
+
+```yaml
+rules:
+  - {decision: brind_account_open_review, when: "obs.id_match < 0.8", action: external}
+  - {decision: brind_account_open_review, action: approve}
+external:
+  brind_account_open_review:
+    timeout: 2d
+    grayson:
+      instructions: "Decide whether to open this account. Synthetic and stolen identities are common here."
+      criteria: {approve: "a real person applying for themselves", decline: "a synthetic or stolen identity"}
+```

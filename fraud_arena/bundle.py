@@ -79,6 +79,18 @@ def load(bundle_dir: Path, *, role: str, decisions: set[str]) -> Bundle:
     return Bundle(policy, hashlib.sha256(canon).hexdigest(), notes)
 
 
+def take_grayson(policy: dict) -> dict[str, dict]:
+    """Grayson at the gates: a deployment's `external: {<decision>: {timeout, grayson: {instructions, criteria}}}`
+    sends that decision's waiting cases to Grayson, answered by the harness each simulated day. The engine sees only
+    the timeout; the harness keeps the Grayson part (`criteria` maps each action to what it means)."""
+    out = {}
+    for decision, ext in (policy.get("external") or {}).items():
+        if isinstance(ext, dict) and "grayson" in ext:
+            g = ext.pop("grayson") or {}
+            out[decision] = {"instructions": str(g.get("instructions", "")), "criteria": dict(g.get("criteria") or {})}
+    return out
+
+
 def split_by_role(policy: dict, role_of: dict[str, str]) -> dict[str, dict]:
     """One deployment per role (the engine deploys into one role at a time): each role's rules, and the models its
     rules read (`score.<model>`)."""
@@ -86,8 +98,12 @@ def split_by_role(policy: dict, role_of: dict[str, str]) -> dict[str, dict]:
     models = policy.get("models") or {}
     for r in policy.get("rules", []):
         role = role_of[r["decision"]]
-        out.setdefault(role, {k: v for k, v in policy.items() if k not in ("rules", "models")} | {"rules": []})
+        out.setdefault(role, {k: v for k, v in policy.items() if k not in ("rules", "models", "external")} | {"rules": []})
         out[role]["rules"].append(r)
+    for decision, ext in (policy.get("external") or {}).items():
+        role = role_of.get(decision)
+        if role in out:
+            out[role].setdefault("external", {})[decision] = ext
     for role, dep in out.items():
         text = json.dumps(dep["rules"])
         used = {m: models[m] for m in models if f"score.{m}" in text}

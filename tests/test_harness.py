@@ -383,3 +383,13 @@ def test_grayson_batch_respects_budget_and_cache(tmp_path, monkeypatch):
     assert sum(1 for a in out if "error" not in a) >= 4      # 3 fresh calls, repeats come from the cache
     assert g.calls_used() == 3
     assert any("budget" in a.get("error", "") for a in out)
+
+
+def test_grayson_gate_config_is_kept_by_the_harness_and_split_by_role():
+    from fraud_arena.bundle import split_by_role, take_grayson
+    pol = {"format": 1, "rules": [{"decision": "a", "action": "external"}, {"decision": "b", "action": "x"}],
+           "external": {"a": {"timeout": "2d", "grayson": {"instructions": "i", "criteria": {"x": "1", "y": "2"}}}}}
+    g = take_grayson(pol)
+    assert g == {"a": {"instructions": "i", "criteria": {"x": "1", "y": "2"}}}
+    parts = split_by_role(pol, {"a": "r1", "b": "r2"})
+    assert parts["r1"]["external"] == {"a": {"timeout": "2d"}} and "external" not in parts["r2"]
