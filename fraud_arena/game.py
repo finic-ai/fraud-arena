@@ -64,7 +64,7 @@ class GameConfig:
     period_days: int = 30
     horizon_days: int = 120
     weights: ScoreWeights = field(default_factory=ScoreWeights)
-    grayson_calls_per_period: int = 200
+    grayson_calls_per_period: int = 10000
     max_waits: int = 20
     # After the last period the world runs on with every bundle and plan frozen and no sessions, so fraud of the
     # last weeks can settle (chargebacks, returns, disputes arrive late) before scoring.

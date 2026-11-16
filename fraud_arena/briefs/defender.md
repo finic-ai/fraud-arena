@@ -13,7 +13,9 @@ What you can use
   your plan). Python with pandas, scikit-learn, xgboost and lightgbm is installed.
 - Grayson: `fa-grayson ask request.json` with `{{"data": {{...case fields...}}, "questions": {{"<name>": {{"type":
   "choice", "instructions": "...", "criteria": {{"<option>": "<meaning>"}}}}}}}}`. Use it to review cases, label
-  training data or check a rule's hits. You have {grayson_budget} calls this period (`fa-grayson budget`).
+  training data or check a rule's hits. You have {grayson_budget} calls this period (`fa-grayson budget`). Grayson is
+  fast and cheap, so labelling thousands of cases is fine: `fa-grayson batch requests.jsonl --out answers.jsonl` runs
+  a JSONL file of requests in parallel.
 
 Your review team
 - {institution} has a human review team with a fixed number of reviews a day. Your detection can send cases to it

@@ -150,7 +150,7 @@ def main(argv=None) -> int:
     q.add_argument("--start-day", type=int, default=180)
     q.add_argument("--period-days", type=int, default=30)
     q.add_argument("--horizon-days", type=int, default=120)
-    q.add_argument("--grayson-budget", type=int, default=200)
+    q.add_argument("--grayson-budget", type=int, default=10000)
     q.add_argument("--text-generator", default="none",
                    help="claude-code:sonnet|claude-code:opus|codex:<model>|none: rewrites the defenders' rich text")
     q.add_argument("--text-cache", default="~/.cache/fraud-arena/textgen", help="kept across boundaries and games")

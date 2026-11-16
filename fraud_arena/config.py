@@ -62,7 +62,7 @@ class EpisodeConfig:
     horizon_days: int = 120
     phase: str = "static"
     weights: ScoreWeights = field(default_factory=ScoreWeights)
-    grayson_calls_per_period: int = 500
+    grayson_calls_per_period: int = 10000
 
     def __post_init__(self):
         if self.institution not in INSTITUTIONS:

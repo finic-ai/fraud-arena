@@ -369,3 +369,17 @@ def test_manual_review_caps_resolves_and_refuses(tmp_path):
     assert any("names 2" in r for r in res.refused) and any("isn't one of" in r for r in res.refused)
     assert any("capacity" in r for r in res.refused)               # 4 asked, 3 done: the verdict was cut
     assert res.typology == [("A1", "account", "ato")]
+
+
+def test_grayson_batch_respects_budget_and_cache(tmp_path, monkeypatch):
+    class Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self, *a): return json.dumps({"answers": {"q": {"choice": "ok"}}}).encode()
+    monkeypatch.setattr("fraud_arena.grayson.urlopen", lambda req, timeout: Resp())
+    g = GraysonClient(tmp_path, budget=3, api_key="k")
+    q = {"q": {"type": "choice", "instructions": "", "criteria": {"ok": "", "fraud": ""}}}
+    out = g.ask_many([{"data": {"i": i % 4}, "questions": q} for i in range(8)], workers=4)
+    assert sum(1 for a in out if "error" not in a) >= 4      # 3 fresh calls, repeats come from the cache
+    assert g.calls_used() == 3
+    assert any("budget" in a.get("error", "") for a in out)
