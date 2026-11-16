@@ -65,7 +65,8 @@ class EpisodeState:
     last_error: str | None = None
 
 
-def brief_text(cfg: EpisodeConfig, boundary: int, outcomes: dict, state: EpisodeState, *, first: bool) -> str:
+def brief_text(cfg: EpisodeConfig, boundary: int, outcomes: dict, state: EpisodeState, *, first: bool,
+               families=None) -> str:
     tpl = resources.files("fraud_arena").joinpath("briefs/defender.md").read_text()
     last = ("No bundle is deployed yet; the institution's built-in rules decide." if state.last_deploy is None
             else f"Your bundle {state.last_deploy[:12]} is deployed.")
@@ -77,7 +78,7 @@ def brief_text(cfg: EpisodeConfig, boundary: int, outcomes: dict, state: Episode
         first="This is the first boundary: build your stack from the history." if first
         else "Continue from your workspace and notes.",
         deploy_state=last, outcomes=json.dumps(outcomes, indent=2, sort_keys=True),
-        grayson_budget=cfg.grayson_calls_per_period)
+        grayson_budget=cfg.grayson_calls_per_period, families=", ".join(sorted(families or [])))
 
 
 class Episode:

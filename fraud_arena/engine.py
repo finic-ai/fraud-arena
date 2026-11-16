@@ -70,6 +70,15 @@ class RunmereEngine:
                         "tables": obs.get("tables", [])})
         return out
 
+    META_LABELS = {"incident", "ring_member", "ring_account", "credentials_phished", "phishing_campaign"}
+
+    def fraud_families(self, cfg) -> set[str]:
+        """The world's fraud families, as its labels name them (for typology labels)."""
+        text = Path(str(cfg.world)).read_text()
+        names = set(re.findall(r"label:\s*\{\s*name:\s*([a-z_0-9]+)", text))
+        names |= set(re.findall(r"^\s*label:\s*([a-z_0-9]+)\s*$", text, re.M))
+        return names - self.META_LABELS
+
     def decisions_of(self, cfg) -> set[str]:
         return {d["decision"] for d in self.decision_points(cfg)}
 

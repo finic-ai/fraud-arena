@@ -21,6 +21,20 @@ Your review team
   `decision_points` are the team's verdicts on the cases it reviews: write rules for those too. Cases beyond the team's
   capacity wait in its queue while the customer waits, so send it the cases where a human review pays off.
 
+Manual review (if `manual_review` appears in your outcomes below)
+- Your review team works the cases your rules hold (`review`, `hold`, ...): they wait in the `REVIEW_QUEUE` table until
+  you decide them or they pass their due time and take the institution's default. You can also act on accounts after
+  looking into them yourself (the tables, the call notes, Grayson). A review doesn't tell you the truth: you can be
+  wrong, and a good customer restricted or closed by mistake complains and may leave.
+- Write `bundle/reviews.json` each turn, at most `capacity_this_period` reviews in all:
+  `{{"actions": [{{"kind": "account", "id": "<ACCT_NO>", "action": "restrict"}}],
+    "verdicts": [{{"case_no": "<CASE_NO>", "verdict": "reject"}}],
+    "typology": [{{"kind": "account", "id": "<ACCT_NO>", "type": "<family>"}}]}}`
+  Kinds: `account` (bank and exchange `ACCT_NO`) with actions watch / restrict / close / none; `shop_account`
+  (`CUSTOMER_NO`) with watch / lock / close / none; `courier` (`COURIER_NO`) with watch / hold_payouts / deactivate /
+  none. Verdicts: release / reject. Optionally label the cases you looked into with their fraud type (or `genuine`),
+  from: {families}. Typology labels are graded and reported, and don't use capacity.
+
 What you deploy
 Write `bundle/policy.yaml` before you finish: a Runmere deployed policy for role `{role}`. For each decision point
 you change, ordered rules choose an action when their `when` holds over the decision's observation features

@@ -340,3 +340,32 @@ def test_a_later_order_on_the_same_card_is_not_a_won_chargeback(tmp_path):
     _write(tmp_path / "owners.parquet", {"entity": ["card", "hop"], "institution": ["arbelton", "hopcrate"]})
     kw = dict(role="r", start="2026-06-01T00:00:00Z", end="2026-08-01T00:00:00Z", weights=ScoreWeights())
     assert window_score(t, tmp_path / "owners.parquet", institution="hopcrate", **kw).losses == 40.0
+
+
+def test_manual_review_caps_resolves_and_refuses(tmp_path):
+    from fraud_arena.review import Reviewer
+
+    class R:
+        def __init__(self): self.set = []
+        def rows(self, etype, attrs, where_attr=None, equals=None):
+            data = {"institution": [{"id": "I1", "name": "brindlemark"}], "business": [],
+                    "account": [{"id": "A1", "number": "111", "institution": "I1"},
+                                {"id": "A2", "number": "222", "institution": "I1"},
+                                {"id": "A3", "number": "222", "institution": "I1"}],
+                    "review_case": [{"id": "C1", "case_no": "RC9"}]}[etype]
+            return [r for r in data if where_attr is None or r.get(where_attr) == equals]
+        def intervene(self, t, e, a, v): self.set.append((t, e, a, v))
+
+    run = R()
+    (tmp_path / "reviews.json").write_text(json.dumps({
+        "actions": [{"kind": "account", "id": "111", "action": "restrict"},
+                    {"kind": "account", "id": "222", "action": "close"},
+                    {"kind": "account", "id": "111", "action": "nuke"}],
+        "verdicts": [{"case_no": "RC9", "verdict": "reject"}],
+        "typology": [{"kind": "account", "id": "111", "type": "ato"}]}))
+    res = Reviewer().apply(run, "brindlemark", tmp_path / "reviews.json", capacity=3)
+    assert ("account", "A1", "manual_action", "restrict") in run.set
+    assert not any(e == "A2" for _, e, _, _ in run.set)          # ambiguous number refused
+    assert any("names 2" in r for r in res.refused) and any("isn't one of" in r for r in res.refused)
+    assert any("capacity" in r for r in res.refused)               # 4 asked, 3 done: the verdict was cut
+    assert res.typology == [("A1", "account", "ato")]

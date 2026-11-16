@@ -69,6 +69,8 @@ class GameConfig:
     # After the last period the world runs on with every bundle and plan frozen and no sessions, so fraud of the
     # last weeks can settle (chargebacks, returns, disputes arrive late) before scoring.
     settle_days: int = 30
+    # The defender works its institution's review queue and acts on accounts (Fraud World's manual review).
+    manual_review: bool = True
 
     def boundaries(self):
         end = self.start_day + self.horizon_days
@@ -94,6 +96,11 @@ class Game:
         self.role_of_decision: dict[str, str] = {}
         self.owner_of_role: dict[str, str] = {}
         self.last_tables: dict[str, Path] = {}
+        from .review import Reviewer
+        self.reviewer = Reviewer()
+        self.review_on: set[str] = set()
+        self.typology: dict[str, list] = {}
+        self.review_feedback: dict[str, dict] = {}
         self.out, self.sandbox = Path(out), Path(sandbox)
         self.attacker = attacker_api
         self.log = log
@@ -125,6 +132,14 @@ class Game:
             if p.side == "attacker":
                 self.ring_ids[p.target] = self.attacker.entity(game, p.target)
                 self.ring_loss_at_start[p.target] = self.attacker.ring_loss(game, p.target)
+        if cfg.manual_review:
+            for p in self.players:
+                if p.side == "defender":
+                    try:
+                        self.reviewer.hand_desk_to_defender(game, p.target)
+                        self.review_on.add(p.name)
+                    except Exception as e:  # a world without review desks: detection only
+                        self.log({"event": "no_manual_review", "player": p.name, "why": str(e)[:200]})
         self.log({"event": "players", "players": [(p.name, p.runner.name, p.runner.model) for p in self.players]})
         bounds = cfg.boundaries()
         for i in range(len(bounds) - 1):
@@ -196,8 +211,13 @@ class Game:
             outcomes["fraud_signals"] = self.engine.fraud_signals(data, self.last_tables.get(p.name), ecfg, b)
             outcomes["fraud_signals_note"] = ("rows new since your last turn" if p.name in self.last_tables
                                               else "rows of the last 30 days")
+            if p.name in self.review_on:
+                from .review import REVIEWS_PER_DAY
+                outcomes["manual_review"] = {
+                    "capacity_this_period": REVIEWS_PER_DAY[p.target] * cfg.period_days,
+                    "last_period": self.review_feedback.get(p.name, {"applied": 0, "refused": []})}
             self.last_tables[p.name] = data
-            prompt = brief_text(ecfg, b, outcomes, st, first=first)
+            prompt = brief_text(ecfg, b, outcomes, st, first=first, families=self.engine.fraud_families(ecfg))
             (ws / ".arena" / "grayson").mkdir(parents=True, exist_ok=True)
             (ws / ".arena" / "grayson" / "calls.json").write_text(json.dumps({"used": 0}))
             self.engine.write_tables(game, ecfg, tag=p.name)
@@ -265,6 +285,18 @@ class Game:
                 applied = f"plan@{b}"
         except Exception as e:  # refused bundles and plans go back to the player next period
             err = f"{type(e).__name__}: {e}"
+        if p.side == "defender" and p.name in self.review_on:
+            from .review import REVIEWS_PER_DAY
+            rpath = self.workspace(p) / "bundle" / "reviews.json"
+            rres = self.reviewer.apply(game, p.target, rpath, REVIEWS_PER_DAY[p.target] * self.cfg.period_days)
+            self.typology.setdefault(p.name, []).extend(rres.typology)
+            self.review_feedback[p.name] = rres.summary()
+            if rpath.exists():
+                keep = self.out / "reviews-applied" / f"{p.name}-{b}.json"
+                keep.parent.mkdir(parents=True, exist_ok=True)
+                keep.write_text(rpath.read_text())
+                rpath.rename(self.workspace(p) / "review" / f"applied-day-{b}.json") if (self.workspace(p) / "review").exists() else rpath.unlink()
+            self.log({"event": "manual_review", "player": p.name, "boundary": b, **rres.summary()})
         review = None
         if p.side == "defender":
             rv = self.workspace(p) / "review" / f"day-{b}.md"
@@ -299,6 +331,10 @@ class Game:
                 r = window_score(*exports["reference"], institution=p.target, role=ecfg.role, start=start, end=end,
                                  weights=cfg.weights)
                 result["defenders"][p.name] = paired(g, r, cfg.weights).as_dict() | {"institution": p.target}
+                if p.name in self.typology:
+                    from .review import grade_typology
+                    result["defenders"][p.name]["typology"] = grade_typology(
+                        exports["game"][0], self.typology[p.name], self.engine.fraud_families(any_cfg))
             else:
                 base = self.ring_loss_at_start.get(p.target, {"observed": 0.0, "background": 0.0})
                 gl, rl = self.attacker.ring_loss(game, p.target), self.attacker.ring_loss(ref, p.target)
