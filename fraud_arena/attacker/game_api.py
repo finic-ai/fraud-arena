@@ -66,4 +66,9 @@ class Attackers:
         errors = menus.validate_plan(plan, self.schema(ring))
         if errors:
             raise ValueError("; ".join(errors[:10]))
-        return menus.apply_plan(run, ring, plan)
+        return menus.apply_plan(run, ring, plan, world=self.world)
+
+    def ring_loss(self, run, ring: int) -> float:
+        """What the ring has taken so far, by the world's own account: the losses of its incidents (grader side)."""
+        rows = run.rows("incident", ["loss"], where_attr="ring", equals=self.entity(run, ring))
+        return float(sum((r.get("loss") or 0) for r in rows))

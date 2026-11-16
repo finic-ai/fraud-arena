@@ -114,9 +114,11 @@ class Game:
                 p = Player(f"attacker-r{ring}", "attacker", ring, self.attacker_runners(i, ring))
                 self.players.append(p)
                 self.state[p.name] = EpisodeState()
+        self.ring_loss_at_start = {}
         for p in self.players:
             if p.side == "attacker":
                 self.ring_ids[p.target] = self.attacker.entity(game, p.target)
+                self.ring_loss_at_start[p.target] = self.attacker.ring_loss(game, p.target)
         self.log({"event": "players", "players": [(p.name, p.runner.name, p.runner.model) for p in self.players]})
         bounds = cfg.boundaries()
         for i in range(len(bounds) - 1):
@@ -195,8 +197,9 @@ class Game:
                 bun = bundles.load(self.workspace(p) / "bundle", role=ecfg.role,
                                    decisions=self.engine.decisions_of(ecfg))
                 if bun.digest != st.last_deploy:
-                    parts = bundles.split_by_role(bun.policy, self.engine.role_of(ecfg))
-                    for role in ecfg.roles:
+                    role_of = self.engine.role_of(ecfg)
+                    parts = bundles.split_by_role(bun.policy, role_of)
+                    for role in [r for r in ecfg.roles if r in set(role_of.values())]:
                         if role in parts:
                             game.deploy(role, parts[role])
                         elif hasattr(game, "deployed") and game.deployed(role):
@@ -242,8 +245,9 @@ class Game:
                                  weights=cfg.weights)
                 result["defenders"][p.name] = paired(g, r, cfg.weights).as_dict() | {"institution": p.target}
             else:
-                g = ring_take(exports["game"][0], self.ring_ids[p.target], start, end)
-                r = ring_take(exports["reference"][0], self.ring_ids[p.target], start, end)
+                base = self.ring_loss_at_start.get(p.target, 0.0)
+                g = self.attacker.ring_loss(game, p.target) - base
+                r = self.attacker.ring_loss(ref, p.target) - base
                 result["attackers"][p.name] = {"ring": p.target, "stolen": g, "stolen_by_scripted_ring": r,
                                                "vs_scripted": g - r}
         tokens = {}

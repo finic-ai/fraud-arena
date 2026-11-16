@@ -56,6 +56,7 @@ class Attackers:
     def menu(self, ring): return {"type": "object"}
     def brief(self, **k): return "plan"
     def apply_plan(self, run, ring, plan): run.plans[ring] = plan
+    def ring_loss(self, run, ring): return 80.0 if run.plans else (50.0 if run.day > 180 else 0.0)
 
 
 class Scripted:
