@@ -99,7 +99,7 @@ def window_score(truth: Path, accounts_institution: Path, *, institution: str, r
           from flows group by acct)
         select institution,
                sum(case when labelled then out_e - out_s else least(in_e, out_e) - least(in_s, out_s) end)::double
-        from a group by 1""").fetchall()
+        from a where institution not in {"(" + ", ".join(f"'{m}'" for m in MERCHANTS) + ")"} group by 1""").fetchall()
     mule = dict(mule_rows)
     own, other, by_scenario = 0.0, 0.0, {}
     for inst, scen, amt in rows:
