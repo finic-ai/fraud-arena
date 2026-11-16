@@ -45,18 +45,34 @@ def window_score(truth: Path, accounts_institution: Path, *, institution: str, r
                   where time >= timestamptz '{start}' and time < timestamptz '{end}'""")
     # A loss is scenario-caused money leaving an institution: paid by the institution itself or by one of its
     # accounts to anything outside it. Fraud World taints only some flows (`dirty`), so the cause decides, not the
-    # taint. Money leaving a mule's or a ring's own account is laundering, not a loss; money that only passes
-    # through an institution is counted where it left the victim's.
+    # taint. Pass-through is not a loss: an account's loss is its scenario-caused outflow beyond the scenario-caused
+    # money it received (a mule forwarding what a scam sent it nets to zero, labelled or not), counted as the change
+    # over the window of that cumulative net, clipped at zero. Ring and mule accounts never count.
     c.execute(f"""create view launder as select distinct subject from '{T}/labels.parquet'
                   where label in ('ring_account', 'money_mule')""")
-    rows = c.execute("""
-        select po.institution, coalesce(p.cause_scenario, ''), sum(p.amount)::double
-        from post p join owners po on po.entity = p.payer
+    c.execute(f"""create view flows as
+        select p.time, po.institution, coalesce(p.cause_scenario, '') scen, p.payer acct, p.amount amt
+        from '{T}/postings.parquet' p join owners po on po.entity = p.payer
         left join owners pe on pe.entity = p.payee
         where p.cause_kind = 'scenario' and p.amount > 0
           and (pe.institution is null or pe.institution <> po.institution)
-          and p.payer not in (select subject from launder)
-        group by all""").fetchall()
+        union all
+        select p.time, pe.institution, coalesce(p.cause_scenario, ''), p.payee, -p.amount
+        from '{T}/postings.parquet' p join owners pe on pe.entity = p.payee
+        where p.cause_kind = 'scenario' and p.amount > 0""")
+    rows = c.execute(f"""
+        with acct as (
+          select acct, any_value(institution) institution,
+                 greatest(sum(case when time < timestamptz '{end}' then amt else 0 end), 0)
+               - greatest(sum(case when time < timestamptz '{start}' then amt else 0 end), 0) loss
+          from flows where acct not in (select subject from launder) group by acct),
+        share as (
+          select acct, scen, sum(amt) out from flows
+          where amt > 0 and time >= timestamptz '{start}' and time < timestamptz '{end}' group by all)
+        select a.institution, s.scen, sum(a.loss * s.out / t.total)::double
+        from acct a join share s using (acct)
+        join (select acct, sum(out) total from share group by acct) t using (acct)
+        where a.loss > 0 group by all""").fetchall()
     own, other, by_scenario = 0.0, 0.0, {}
     for inst, scen, amt in rows:
         if inst == institution:

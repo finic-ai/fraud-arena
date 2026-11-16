@@ -242,3 +242,28 @@ def test_episode_resumes_after_usage_limit(tmp_path):
     assert state["next_period"] == 1
     res = ep.run()
     assert [p["boundary"] for p in res["periods"]] == [180, 190, 200]
+
+
+def test_pass_through_mules_are_not_losses_even_unlabelled(tmp_path):
+    from datetime import datetime, timezone
+    t = tmp_path / "truth"
+    t.mkdir()
+    when = [datetime(2026, 7, 1, tzinfo=timezone.utc)] * 3
+    # A victim at brindlemark sends 100 to an unlabelled mule at dovrex, who forwards 95 out to the crew.
+    _write(t / "postings.parquet", {"key": ["e1", "e2", "e3"], "time": when,
+                                    "payer": ["acc_v", "acc_mule", "acc_good"], "payee": ["acc_mule", "ext", "ext"],
+                                    "amount": [100.0, 95.0, 30.0], "dirty": [0.0, 0.0, 0.0],
+                                    "cause_kind": ["scenario", "scenario", "process"],
+                                    "cause_scenario": ["romance_scam", "ring_mule_flow", None]})
+    _write(t / "labels.parquet", {"label": ["incident"], "subject": ["x"]})
+    _write(t / "events.parquet", {"key": ["e1"], "cause_kind": ["scenario"]})
+    _write(t / "decisions.parquet", {"key": ["z"], "time": when[:1], "role": ["r"], "action": ["approve"],
+                                     "decision": ["x"]})
+    _write(tmp_path / "owners.parquet", {"entity": ["acc_v", "acc_mule", "acc_good"],
+                                         "institution": ["brindlemark", "dovrex", "brindlemark"]})
+    w = ScoreWeights()
+    kw = dict(role="r", start="2026-06-01T00:00:00Z", end="2026-08-01T00:00:00Z", weights=w)
+    b = window_score(t, tmp_path / "owners.parquet", institution="brindlemark", **kw)
+    d = window_score(t, tmp_path / "owners.parquet", institution="dovrex", **kw)
+    assert b.losses == 100.0 and b.losses_by_scenario == {"romance_scam": 100.0}
+    assert d.losses == 0.0 and b.displacement == 0.0
