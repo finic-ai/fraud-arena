@@ -203,8 +203,28 @@ def interventions(plan: dict, ring: int) -> list[tuple[str, object]]:
     return out
 
 
-def apply_plan(run, ring: int, plan: dict) -> list[tuple[str, object]]:
-    """Sets the plan on the ring in a `runmere.Run` at its boundary. Returns what it set."""
+_WORLD: list[Path] = []
+
+
+def plan_menu(world: Path, ring: int | None = None) -> dict:
+    """The plan schema of one ring, or of every ring by its name (`R1` to `R10`). Remembers `world`, so
+    `apply_plan` can validate against it."""
+    _WORLD[:] = [Path(world)]
+    if ring is not None:
+        return plan_schema(world, ring)
+    return {f"R{r}": plan_schema(world, r) for r in sorted(RINGS)}
+
+
+def apply_plan(run, ring: int, plan: dict, *, world: Path | None = None) -> list[tuple[str, object]]:
+    """Validates the plan against the world's menu (`world`, or the one `plan_menu` last read) and sets it on the ring in
+    a `runmere.Run` at its boundary, one intervention per plan attribute. Raises `ValueError` on an invalid plan
+    before setting anything. Returns what it set."""
+    w = world or (_WORLD[0] if _WORLD else None)
+    if w is None:
+        raise ValueError("apply_plan needs the world: pass `world`, or call `plan_menu(world)` first")
+    errors = validate_plan(plan, plan_schema(w, ring))
+    if errors:
+        raise ValueError("; ".join(errors))
     rows = run.rows("ring", ["number"], where_attr="number", equals=ring)
     if len(rows) != 1:
         raise ValueError(f"no ring R{ring}")

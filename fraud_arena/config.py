@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# The defender role and the decisions it owns at each observed institution, as Fraud World declares them. Hopcrate
-# and Kellmont declare no defender decisions yet, so they can't host a defender episode.
+# The defender role at each observed institution, as Fraud World declares it. Its analyst role (manual review
+# queues) keeps its built-in policy for now.
 INSTITUTIONS = {
     "brindlemark": {"role": "brind_defender", "observer": "brindlemark"},
     "dovrex": {"role": "dovrex_defender", "observer": "dovrex"},
+    "hopcrate": {"role": "hop_defender", "observer": "hopcrate"},
+    "kellmont": {"role": "kell_defender", "observer": "kellmont"},
 }
 
 

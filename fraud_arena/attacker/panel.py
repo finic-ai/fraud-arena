@@ -50,7 +50,7 @@ class AttackerPanel:
             key = str(cfg.ring)
             done = [p for p in self.state["plans"] if p["ring"] == cfg.ring and p["day"] == day]
             if done:
-                menu.apply_plan(run, cfg.ring, done[-1]["plan"])
+                menu.apply_plan(run, cfg.ring, done[-1]["plan"], world=self.world)
                 continue
             now = view.snapshot(run, cfg.ring)
             before = self.state["snapshots"].get(key)
@@ -60,7 +60,7 @@ class AttackerPanel:
             result = run_boundary(cfg, self.runners[cfg.ring], workspace=self.root / f"R{cfg.ring}" / "workspace",
                                   logs=self.root / "logs", world=self.world, view=v, day=day,
                                   period_days=period_days, boundary=boundary, boundaries=boundaries)
-            menu.apply_plan(run, cfg.ring, result.plan)
+            menu.apply_plan(run, cfg.ring, result.plan, world=self.world)
             self.state["snapshots"][key] = {"day": day, "snap": now}
             self.state["plans"].append({"ring": cfg.ring, "day": day, "plan": result.plan,
                                         "result": asdict(result)})
@@ -72,4 +72,4 @@ class AttackerPanel:
         """Sets the plans recorded for `day` in another run of the same episode (the paired reference run)."""
         for p in self.state["plans"]:
             if p["day"] == day:
-                menu.apply_plan(run, p["ring"], p["plan"])
+                menu.apply_plan(run, p["ring"], p["plan"], world=self.world)

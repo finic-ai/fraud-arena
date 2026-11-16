@@ -139,3 +139,19 @@ def test_the_panel_runs_operated_rings_and_resumes(tmp_path, monkeypatch):
     ref = FakeRun()
     again.replay(ref, 7)
     assert ref.set == run.set
+
+
+@needs_world
+def test_the_public_api(tmp_path):
+    from fraud_arena import attacker
+    schemas = attacker.plan_menu(WORLD)
+    assert sorted(schemas, key=lambda k: int(k[1:])) == [f"R{r}" for r in range(1, 11)]
+    run = FakeRun()
+    with pytest.raises(ValueError):
+        attacker.apply_plan(run, 1, {"volume": 99})
+    assert run.set == []
+    attacker.apply_plan(run, 1, {"volume": 2})
+    assert ("ring", "r1", "plan_volume", 2) in run.set
+    v = attacker.ring_view(run, 1, 0, 7)
+    assert v["ring"] == "R1" and v["period"] == {"start_day": 0, "end_day": 7}
+    assert attacker.active_rings(run) == []

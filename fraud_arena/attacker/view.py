@@ -25,6 +25,7 @@ INSTITUTIONS = ["arbelton", "brindlemark", "cedarmoor", "dovrex", "everhollow"]
 PLAN_ATTRS = ["plan_volume", "plan_quiet", "plan_timing", "plan_where", "plan_devices", "plan_exits",
               "plan_identities", "plan_mule_target"]
 DAY_MS = 86_400_000
+EPOCH_MS = 1_735_689_600_000  # Fraud World's epoch, 2025-01-01T00:00:00Z
 
 VIEW_KEYS = {"ring", "day", "period", "memory", "attempts", "attempts_total", "accounts", "mules", "plan_in_force"}
 
@@ -134,3 +135,41 @@ def check_view(view: dict) -> None:
     for m in view["memory"].values():
         if set(m) != {"recent_successes", "recent_failures", "last_heard_day"}:
             raise ValueError("a memory row has other keys")
+
+
+# The last snapshot of each ring in each run object, so `ring_view` can tell the period's attempts from older ones.
+# A harness that resumes from a checkpoint keeps its own snapshots (`AttackerPanel` does) and passes `before`.
+_LAST: dict[tuple[int, int], tuple[int, dict]] = {}
+
+
+def view_of(run, ring: int, start_day: int, end_day: int, *, epoch_ms: int = EPOCH_MS,
+            before: dict | None = None) -> dict:
+    """What ring R`ring` knows at the boundary on `end_day` about the period since `start_day`. Without `before`, the
+    period's attempts are those since this function last looked at this ring in this run (all of them the first
+    time)."""
+    now = snapshot(run, ring)
+    if before is None:
+        last = _LAST.get((id(run), ring))
+        before = last[1] if last and last[0] <= start_day else None
+    _LAST[(id(run), ring)] = (end_day, now)
+    return ring_view(now, before, ring=ring, day=end_day, period_start=start_day, epoch_ms=epoch_ms)
+
+
+def active_rings(run, *, since: dict[int, dict] | None = None) -> list[int]:
+    """Rings that attempted anything since their snapshot in `since` (or since `view_of` last looked at them in this
+    run; ever, without one), or that control an account that is still open or restricted."""
+    from .menu import RINGS
+    out = []
+    for ring in sorted(RINGS):
+        try:
+            now = snapshot(run, ring)
+        except ValueError:
+            continue
+        prev = (since or {}).get(ring)
+        if prev is None and (id(run), ring) in _LAST:
+            prev = _LAST[(id(run), ring)][1]
+        new = set(now["incidents"]) - set((prev or {}).get("incidents", {}))
+        holds = any(a["status"] != "closed" for a in now["accounts"])
+        if new or holds:
+            out.append(ring)
+    return out
