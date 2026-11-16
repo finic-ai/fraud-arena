@@ -84,6 +84,23 @@ RICH = [
     TextSpec("hopcrate", "SUPPORT_TICKETS", (("BODY", 900),), "a support ticket's message",
              "the customer, courier or restaurant writing to Hopcrate support", ("CATEGORY", "CHANNEL"),
              ("CONTACT_EMAIL", "OPENED_TS")),
+    *[TextSpec(inst, "ACCOUNT_APPLICATIONS", (("OCCUPATION", 80), ("EMPLOYER", 80), ("SOURCE_OF_FUNDS", 200),
+                                              ("ACCOUNT_PURPOSE", 200)),
+               "an applicant's answers in the free-text fields of an account application",
+               "the applicant, typing into the application form", ("PRODUCT", "CHANNEL", "STATED_INCOME"), ("APP_ID",))
+      for inst in ("brindlemark", "dovrex")],
+    TextSpec("brindlemark", "BENEFICIARY_CHANGES", (("NOTE", 300),),
+             "the note entered with a change to a business payee's bank details",
+             "the person using the business's treasury login to make the change", ("KIND", "NEW_BANK",
+             "CALLBACK_VERIFIED"), ("CHANGE_ID",)),
+    *[TextSpec(inst, "CLAIMS", (("STATEMENT", 900),), "the customer's own statement on a claim about an order",
+               "the customer filing the claim, in their own words", ("KIND", "CLAIM_AMT", "CHANNEL"), ("CLAIM_ID",))
+      for inst in ("hopcrate", "kellmont")],
+    TextSpec("kellmont", "RETURNS", (("COMMENT", 300),), "the customer's comment on a return",
+             "the customer returning the item", ("REASON", "AMT", "CHANNEL"), ("RETURN_ID",)),
+    TextSpec(PUBLIC, "WEBSITE_PAGES", (("PAGE_TITLE", 90), ("PAGE_TEXT", 1500)),
+             "a page of a business's website, as a crawler saw it", "the site's owner", ("DOMAIN", "PATH"),
+             ("SNAPSHOT_ID",)),
     TextSpec(PUBLIC, "ADS", (("HEADLINE", 90), ("BODY", 300)), "an ad's headline and body, as the ad library shows",
              "the advertiser", ("ADVERTISER_NAME", "PLATFORM", "KEYWORDS", "LANDING_DOMAIN"), ("AD_ID",)),
     TextSpec(PUBLIC, "WEBSITES", (("PAGE_TITLE", 90), ("PAGE_TEXT", 1500)), "a website's page title and main text, "
@@ -95,7 +112,9 @@ ROUTINE = {("brindlemark", "P2P", "NOTE"), ("brindlemark", "P2P", "MEMO"), ("bri
            ("brindlemark", "TREASURY_APPROVALS", "MEMO"), ("brindlemark", "ACH", "ENTRY_DESC"),
            ("brindlemark", "ACCOUNT_PARTIES", "NOTE"), ("dovrex", "WITHDRAWAL_ADDRESSES", "LABEL"),
            ("hopcrate", "COURIER_PROFILE_CHANGES", "OLD_VALUE"), ("hopcrate", "COURIER_PROFILE_CHANGES", "NEW_VALUE"),
-           (PUBLIC, "ADS", "KEYWORDS"), (PUBLIC, "WEBSITES", "FORM_FIELDS"), (PUBLIC, "BREACH_NOTICES", "DATA_TYPES")}
+           (PUBLIC, "ADS", "KEYWORDS"), (PUBLIC, "WEBSITES", "FORM_FIELDS"), (PUBLIC, "BREACH_NOTICES", "DATA_TYPES"),
+           *[(inst, "REVIEW_QUEUE", "NOTE") for inst in ("brindlemark", "dovrex", "hopcrate", "kellmont")],
+           ("hopcrate", "MERCHANT_APPLICATIONS", "CUISINE")}
 
 WORLD_BRIEF = ("Ordinary records of their kind: write each as the people involved usually would. The gist says "
                "what happened; nothing more is known.")
@@ -121,6 +140,14 @@ def world_text_columns(world: Path) -> list[tuple[str, str, str]]:
                 if isinstance(c, dict) and c.get("logical") == "text":
                     out.append((obs, table, col))
     return out
+
+
+def uncovered_text_columns(world: Path) -> list[tuple[str, str, str]]:
+    """The defenders' free-text columns with neither a generation spec nor a routine listing: shown as the world's
+    template text, which gives fraud away, so a game with a text generator refuses to start while any remains."""
+    rich = {(s.observer, s.table, c) for s in RICH for c in s.names}
+    seen = set(WHERE)
+    return sorted(c for c in world_text_columns(world) if c[0] in seen and c not in rich and c not in ROUTINE)
 
 
 def scheme_of(scenario: str | None) -> str | None:

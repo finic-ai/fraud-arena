@@ -162,6 +162,12 @@ class Game:
 
     def _run(self) -> dict:
         cfg = self.cfg
+        if self.textgen is not None and Path(cfg.world).exists():
+            from .textgen import uncovered_text_columns
+            missing = uncovered_text_columns(Path(cfg.world))
+            if missing:
+                raise ValueError(f"free-text columns with no text generation spec (they would show the world's "
+                                 f"template text): {missing}")
         any_cfg = cfg.for_institution(next(iter(INSTITUTIONS)))
         base = self.engine.start(any_cfg)
         t0 = time.monotonic()

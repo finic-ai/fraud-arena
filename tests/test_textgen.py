@@ -435,3 +435,14 @@ def test_attacker_brief_explains_scheme_briefs_only_when_attacker_text_is_on():
     assert "You don't write any messages" in off and "briefs/" not in off
     assert "briefs/<scheme>.md" in on and "`ach_return`: Brindlemark CALLS" in on and "x.md: refused" in on
     assert "No real companies or brands" in on and "published" in on
+
+
+def test_text_columns_without_a_spec_are_reported(tmp_path):
+    import yaml
+    from fraud_arena.textgen import uncovered_text_columns
+    w = tmp_path / "w.yaml"
+    w.write_text(yaml.safe_dump({"observers": {
+        "kellmont": {"tables": {"RETURNS": {"columns": {"COMMENT": {"logical": "text"}}},
+                                "NOTES": {"columns": {"BODY": {"logical": "text"}, "N": {"logical": "number"}}}}},
+        "grader": {"tables": {"X": {"columns": {"T": {"logical": "text"}}}}}}}))
+    assert uncovered_text_columns(w) == [("kellmont", "NOTES", "BODY")]  # RETURNS.COMMENT has a spec; grader isn't a player
