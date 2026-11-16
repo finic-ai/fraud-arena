@@ -41,10 +41,17 @@ that hit legitimate activity). Fraudsters see what happens to their attempts and
 Status
 {deploy_state}
 
+Your weekly loss review (required every turn, like a fraud team's weekly review)
+Before you finish, write `review/day-{day}.md` with:
+1. What's new: the fraud signals below, investigated in the tables behind them (which accounts, products, channels,
+   decision points; how the fraud got through or was stopped; what changed since last week).
+2. How your stack is doing: its estimated catch rate and false-positive rate on the labels you have now (disputes,
+   returns, claims, confirmed cases), per decision point, with the numbers and how you computed them.
+3. What you changed in `bundle/` and why, or the evidence for changing nothing. "No change" needs numbers.
+Fraudsters see what happens to their attempts and adapt, so a stack that worked last week may not work this week.
+You have up to two hours per turn.
+
 Your institution's own outcomes since the last boundary: its decisions by action, and `fraud_signals`, what it
 newly learned about fraud in its own records (new disputes, chargebacks, returns, claims, complaints, alerts, reviews
-since your last turn). Fraudsters adapt to what you deploy, so a stack that worked last week may not work this week.
-Each turn, check these signals against what your stack is catching, look into what's new (query the tables behind
-them), and change your stack where it pays off. You have up to two hours of work per turn; use what the situation
-needs.
+since your last turn):
 {outcomes}

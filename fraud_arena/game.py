@@ -51,6 +51,7 @@ class Turn:
     applied: str | None
     error: str | None
     waits: int = 0
+    review: bool | None = None
 
 
 @dataclass
@@ -264,8 +265,18 @@ class Game:
                 applied = f"plan@{b}"
         except Exception as e:  # refused bundles and plans go back to the player next period
             err = f"{type(e).__name__}: {e}"
+        review = None
+        if p.side == "defender":
+            rv = self.workspace(p) / "review" / f"day-{b}.md"
+            review = rv.exists() and rv.stat().st_size > 200
+            if not review:
+                err = (err + "; " if err else "") + f"the weekly review review/day-{b}.md is missing"
+            else:
+                keep = self.out / "reviews" / f"{p.name}-{b}.md"
+                keep.parent.mkdir(parents=True, exist_ok=True)
+                keep.write_text(rv.read_text()[:50000])
         st.last_error = err
-        return Turn(p.name, b, res.ok, round(res.seconds, 1), res.usage, applied, err, waits)
+        return Turn(p.name, b, res.ok, round(res.seconds, 1), res.usage, applied, err, waits, review)
 
     def _write_progress(self):
         tmp = self.out / "progress.json.tmp"
