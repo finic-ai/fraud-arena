@@ -57,15 +57,15 @@ def _player_runner(spec: str, a, user: str):
     kind, model = spec.split(":", 1)
     if kind == "baseline":
         return RUNNERS[kind](model)
-    env = {"FA_GRAYSON_STATE": ".arena/grayson", "FA_GRAYSON_BUDGET": str(a.grayson_budget)}
+    # Grayson reaches players only through the game's broker (FA_GRAYSON_URL/TOKEN, set by the game): the API key
+    # stays with the grader.
+    env = {}
     if kind == "claude-code" and os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
         env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
     if kind == "codex":
         # One Unix user and one login for every Codex player (sandbox/setup-box.sh).
         user = "arena-codex"
         env["CODEX_HOME"] = "/home/arena-codex/.codex"
-    if os.environ.get("GRAYSON_API_KEY"):
-        env["GRAYSON_API_KEY"] = os.environ["GRAYSON_API_KEY"]
     return RUNNERS[kind](model, extra_env=env, as_user=user, proxy=a.proxy, timeout_s=a.session_timeout)
 
 
@@ -107,7 +107,8 @@ def game(a) -> int:
 
     cfg = GameConfig(world=Path(a.world), seed=a.seed, roots=a.roots, partitions=a.partitions,
                      start_day=a.start_day, period_days=a.period_days, horizon_days=a.horizon_days,
-                     grayson_calls_per_period=a.grayson_budget, settle_days=a.settle_days,
+                     grayson_calls_per_period=a.grayson_budget, grayson=a.grayson == "on",
+                     settle_days=a.settle_days, workflow_timeout_s=a.workflow_timeout,
                      text_generator=_text_generator_spec(a), attacker_text=a.attacker_text == "on",
                      text_cache=Path(a.text_cache).expanduser())
     engine = RunmereEngine(Path(a.sandbox))
@@ -163,7 +164,9 @@ def main(argv=None) -> int:
     q.add_argument("--start-day", type=int, default=180)
     q.add_argument("--period-days", type=int, default=30)
     q.add_argument("--horizon-days", type=int, default=120)
-    q.add_argument("--grayson-budget", type=int, default=10000)
+    q.add_argument("--grayson-budget", type=int, default=50000, help="Grayson calls per defender per period")
+    q.add_argument("--grayson", choices=["on", "off"], default="on", help="off: the no-Grayson game")
+    q.add_argument("--workflow-timeout", type=float, default=600.0, help="seconds per batch of a workflow.py")
     q.add_argument("--text-generator", default="none",
                    help="claude-code:sonnet|claude-code:opus|codex:<model>|none: rewrites the defenders' rich text")
     q.add_argument("--text-cache", default="~/.cache/fraud-arena/textgen", help="kept across boundaries and games")

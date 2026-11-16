@@ -31,7 +31,6 @@ cat > /etc/tinyproxy/allow <<'EOF'
 ^api\.openai\.com$
 ^chatgpt\.com$
 ^(auth|ab)\.openai\.com$
-^api\.finic\.ai$
 EOF
 cat > /etc/tinyproxy/tinyproxy.conf <<'EOF'
 User tinyproxy

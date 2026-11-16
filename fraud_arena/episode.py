@@ -72,7 +72,22 @@ def brief_text(cfg: EpisodeConfig, boundary: int, outcomes: dict, state: Episode
             else f"Your bundle {state.last_deploy[:12]} is deployed.")
     if state.last_error:
         last += f"\nYour last bundle was NOT deployed: {state.last_error}\nThe previous one stays in place."
+    if cfg.grayson_calls_per_period > 0:
+        grayson = (
+            "- Grayson, a decision model: `fa-grayson ask request.json` with `{\"data\": {...case fields...}, "
+            "\"questions\": {\"<name>\": {\"type\": \"choice\", \"instructions\": \"...\", \"criteria\": "
+            "{\"<option>\": \"<meaning>\"}}}}`. It answers in milliseconds and is cheap: use it to review cases, label "
+            "training data, check a rule's hits, or decide cases live from your workflow. You have "
+            f"{cfg.grayson_calls_per_period} calls this period, shared by your sessions and your deployed workflow "
+            "(`fa-grayson budget`). `fa-grayson batch requests.jsonl --out answers.jsonl` runs a JSONL file of "
+            "requests in parallel; in Python, `from fraud_arena.grayson import make_client; "
+            "make_client().ask_many(requests)`.")
+        wf_grayson, wf_net = " and Grayson (`make_client()`, on your budget)", " except Grayson"
+    else:
+        grayson = "- Grayson isn't available in this game: build your detection from rules, models and review."
+        wf_grayson, wf_net = "", ""
     return tpl.format(
+        grayson=grayson, workflow_grayson=wf_grayson, workflow_net=wf_net,
         institution=cfg.institution, role=cfg.role, day=boundary, period_days=cfg.period_days,
         end_day=cfg.start_day + cfg.horizon_days, phase=cfg.phase,
         first="This is the first boundary: build your stack from the history." if first

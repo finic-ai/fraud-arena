@@ -8,7 +8,7 @@ want() { if as curl -s -o /dev/null -m 10 "$1"; then echo "reachable   $1"; else
 deny() { if as curl -s -o /dev/null -m 10 "$1"; then echo "REACHABLE (should be blocked) $1"; ok=1; else echo "blocked     $1"; fi; }
 want https://api.anthropic.com
 want https://api.openai.com
-want https://api.finic.ai
+deny https://api.finic.ai  # players reach Grayson only through the game's broker
 deny https://runmere.finic.ai/api/v1/health
 deny https://github.com
 deny https://pypi.org

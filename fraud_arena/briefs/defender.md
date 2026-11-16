@@ -14,11 +14,7 @@ What you can use
   in reality. Nothing in the world tells you which activity was fraud except what those records say.
 - This workspace persists between boundaries. Keep your code, models and notes here (`NOTES.md` is a good place for
   your plan). Python with pandas, scikit-learn, xgboost and lightgbm is installed.
-- Grayson: `fa-grayson ask request.json` with `{{"data": {{...case fields...}}, "questions": {{"<name>": {{"type":
-  "choice", "instructions": "...", "criteria": {{"<option>": "<meaning>"}}}}}}}}`. Use it to review cases, label
-  training data or check a rule's hits. You have {grayson_budget} calls this period (`fa-grayson budget`). Grayson is
-  fast and cheap, so labelling thousands of cases is fine: `fa-grayson batch requests.jsonl --out answers.jsonl` runs
-  a JSONL file of requests in parallel.
+{grayson}
 
 Your review team
 - {institution} has a human review team with a fixed number of reviews a day. Your detection can send cases to it
@@ -47,7 +43,18 @@ you change, ordered rules choose an action when their `when` holds over the deci
 or a tree ensemble dumped from XGBoost / LightGBM, see the tool `deploy_format`), referenced from the policy with
 `file:`. A decision point you don't mention keeps the institution's built-in rule.
 Every rule is checked against `decision_points`: rules, models, Grayson and review are all yours to combine as you see
-fit; nothing requires any of them. Write `bundle/NOTES.md` with what
+fit; nothing requires any of them.
+
+Or decide in your own code: `bundle/workflow.py` with `DECISIONS = [...]` (the decision points it decides) and
+`def decide(decision, cases) -> list[str]`. Each simulated step, every case at those decision points comes to it in
+one batch: each case is the decision's observation features plus `_actions`, the actions allowed; return one action
+per case, in order. Arrange rules, models{workflow_grayson} however you like; module-level code runs once (load your
+models there). It runs as you, from a copy of `bundle/` taken at deploy, in this workspace, without network{workflow_net}.
+A decision point it claims with no rule of yours in `policy.yaml` sends every case to it; your own rules with
+`action: external` send it only the cases they match (the rest decided by your rules). Keep it fast: tens of thousands
+of cases a week. A crash, a timeout (10 minutes per batch) or an action not allowed takes the bundle back, as a rule
+failing at run time does. Test it first: `fa-workflow cases.jsonl --decision <d>`. What it prints goes to
+`.arena/workflow.log`. Write `bundle/NOTES.md` with what
 you changed and why.
 
 How you are scored

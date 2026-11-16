@@ -76,7 +76,7 @@ It doesn't use your human team's capacity; you can still review cases yourself i
 
 ```yaml
 review_queue:
-  kinds: [p2p_hold, wire_hold, account_application]   # optional: only these case kinds
+  kinds: [p2p, wire, consumer_wire, application]   # optional: only these REVIEW_QUEUE.CASE_TYPE kinds (lower case)
   grayson:
     instructions: "Release unless this looks like fraud or a scam in progress."
     criteria: {release: "genuine", reject: "fraud or a scam"}

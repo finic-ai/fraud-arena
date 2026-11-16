@@ -79,6 +79,20 @@ def load(bundle_dir: Path, *, role: str, decisions: set[str]) -> Bundle:
     return Bundle(policy, hashlib.sha256(canon).hexdigest(), notes)
 
 
+def digest_files(bundle_dir: Path, policy_digest: str) -> str:
+    """The deployed bundle's identity: the policy, and every file a workflow can load (reviews.json is per turn)."""
+    h = hashlib.sha256(policy_digest.encode())
+    for f in sorted(p for p in bundle_dir.rglob("*") if p.is_file() and p.name != "reviews.json"
+                    and "__pycache__" not in p.parts):
+        h.update(str(f.relative_to(bundle_dir)).encode() + b"\0" + f.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def external_rule(decision: str) -> dict:
+    """The rule that sends every case at `decision` to the defender's workflow."""
+    return {"decision": decision, "action": "external"}
+
+
 def take_grayson(policy: dict) -> dict[str, dict]:
     """Grayson at the gates: a deployment's `external: {<decision>: {timeout, grayson: {...}}}` sends that decision's
     waiting cases to Grayson, answered by the harness at the end of each simulated day. The engine sees only the

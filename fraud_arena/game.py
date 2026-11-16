@@ -65,7 +65,10 @@ class GameConfig:
     period_days: int = 30
     horizon_days: int = 120
     weights: ScoreWeights = field(default_factory=ScoreWeights)
-    grayson_calls_per_period: int = 10000
+    grayson_calls_per_period: int = 50000
+    # False is the no-Grayson game: the broker refuses every call and the brief says Grayson isn't available.
+    grayson: bool = True
+    workflow_timeout_s: float = 600.0
     max_waits: int = 20
     # After the last period the world runs on with every bundle and plan frozen and no sessions, so fraud of the
     # last weeks can settle (chargebacks, returns, disputes arrive late) before scoring.
@@ -88,7 +91,7 @@ class GameConfig:
         return EpisodeConfig(world=self.world, institution=inst, seed=self.seed, roots=self.roots,
                              partitions=self.partitions, start_day=self.start_day, period_days=self.period_days,
                              horizon_days=self.horizon_days, weights=self.weights,
-                             grayson_calls_per_period=self.grayson_calls_per_period)
+                             grayson_calls_per_period=self.grayson_calls_per_period if self.grayson else 0)
 
 
 class Game:
@@ -105,7 +108,12 @@ class Game:
         self.owner_of_role: dict[str, str] = {}
         self.last_tables: dict[str, Path] = {}
         self.grayson_gates: dict[str, tuple[str, dict]] = {}  # decision -> (defender, question)
-        self.grayson_live: dict[str, object] = {}
+        self.broker = None
+        self.workflows: dict[str, object] = {}  # defender -> its running Workflow
+        self.workflow_dec: dict[str, str] = {}  # decision -> defender whose workflow decides it
+        self.wf_snap: dict[str, Path | None] = {}  # defender -> frozen bundle its workflow runs from
+        self.good_wf_snap: dict[str, Path | None] = {}
+        self.workflow_stats: dict[str, dict] = {}
         self.queue_grayson: dict[str, tuple[str, dict]] = {}  # defender -> (institution, grayson config)
         self.textgen = textgen if textgen is not None else _textgen(cfg, Path(out))
         self.briefs: dict[int, dict[str, str]] = {}  # ring -> scheme -> its attacker's latest brief
@@ -133,6 +141,17 @@ class Game:
     def run(self) -> dict:
         self.out.mkdir(parents=True, exist_ok=True)
         cfg = self.cfg
+        from .grayson import Broker
+        self.broker = Broker(self.out / "grayson", budget=cfg.grayson_calls_per_period, enabled=cfg.grayson)
+        try:
+            return self._run()
+        finally:
+            for wf in self.workflows.values():
+                wf.close()
+            self.broker.close()
+
+    def _run(self) -> dict:
+        cfg = self.cfg
         any_cfg = cfg.for_institution(next(iter(INSTITUTIONS)))
         base = self.engine.start(any_cfg)
         t0 = time.monotonic()
@@ -158,12 +177,14 @@ class Game:
                         self.review_on.add(p.name)
                     except Exception as e:  # a world without review desks: detection only
                         self.log({"event": "no_manual_review", "player": p.name, "why": str(e)[:200]})
+        for p in self.players:
+            if p.side == "defender" and hasattr(p.runner, "extra_env"):
+                p.runner.extra_env = dict(p.runner.extra_env) | self.broker.env(p.name)
         self.log({"event": "players", "players": [(p.name, p.runner.name, p.runner.model) for p in self.players]})
         bounds = cfg.boundaries()
         for i in range(len(bounds) - 1):
             b, nxt = bounds[i], bounds[i + 1]
-            for c_ in self.grayson_live.values():
-                c_.reset_period()
+            self.broker.reset_period()
             turns = self._period(game, b, first=(i == 0))
             self.turns += turns
             for t in turns:
@@ -202,69 +223,120 @@ class Game:
                     game.undeploy(role)
                     del self.deployed[role]
                 owner = self.owner_of_role[role]
+                self._set_workflow(owner, self.good_wf_snap.get(owner))
                 msg = f"your bundle failed at run time and was taken back ({'previous bundle' if good is not None else 'built-in rules'} in force): {e}"
                 self.state[owner].last_error = msg
                 self.log({"event": "bundle_failed", "player": owner, "role": role, "error": str(e)[:300]})
                 continue
             self.good.update(self.deployed)
+            self.good_wf_snap.update(self.wf_snap)
             return trial
         raise RuntimeError(f"the game run can't advance to day {day}")
 
     def _run_with_grayson(self, run, day: int) -> None:
-        """Runs to `day`. When a defender sends a decision to Grayson (`external` with a `grayson` question), the run
-        goes one simulated day at a time and the cases waiting at each day's end go to Grayson in one batch."""
-        if not (self.grayson_gates and hasattr(run, "pending_external")) and not self.queue_grayson:
+        """Runs to `day`. When cases wait for outside decisions (a defender's workflow, or Grayson at a gate), the run
+        goes one simulated day at a time and each time it stops, the waiting cases go out in one batch per decision and
+        their answers go back before it continues."""
+        outside = bool(self.grayson_gates or self.workflow_dec) and hasattr(run, "pending_external")
+        if not outside and not self.queue_grayson:
             run.run_until_day(day)
             return
-        from .grayson import GraysonClient
         d = int(run.day)
         while d < day:
             d += 1
             run.run_until_day(min(d, day))
             if self.queue_grayson:
                 self._grayson_queue(run, d)
-            waiting = ([w for w in run.pending_external() if w["decision"] in self.grayson_gates]
-                       if self.grayson_gates and hasattr(run, "pending_external") else [])
-            if not waiting:
+            for _ in range(100000):
+                if not outside or not self._answer_outside(run, d):
+                    break
+                if int(run.day) < min(d, day):
+                    run.run_until_day(min(d, day))
+
+    def _answer_outside(self, run, d: int) -> int:
+        waiting = run.pending_external()
+        if not waiting:
+            return 0
+        from .bundle import grayson_action
+        from .workflow import WorkflowError
+        answers = []
+        by_wf: dict[tuple[str, str], list] = {}
+        by_owner: dict[str, list] = {}
+        for w in waiting:
+            avail = list(w.get("available") or w["actions"])
+            owner = self.workflow_dec.get(w["decision"])
+            if owner is not None:
+                by_wf.setdefault((owner, w["decision"]), []).append((w, avail))
                 continue
-            from .bundle import grayson_action
-            by_owner: dict[str, list] = {}
-            for w in waiting:
-                owner, q = self.grayson_gates[w["decision"]]
-                avail = list(w.get("available") or w["actions"])
-                if "questions" in q:
-                    questions = {n: {"type": "choice", "instructions": v["instructions"], "criteria": v["criteria"]}
-                                 for n, v in q["questions"].items()}
-                else:
-                    crit = {a: m for a, m in q["criteria"].items() if a in avail}
-                    if not crit:
-                        continue
-                    questions = {"decision": {"type": "choice", "instructions": q["instructions"], "criteria": crit}}
-                req = {"data": w["features"] | {"decision": w["decision"]}, "questions": questions}
-                by_owner.setdefault(owner, []).append((w, q, avail, req))
-            answers, asked = [], 0
-            for owner, items in by_owner.items():
-                client = self.grayson_live.get(owner)
-                if client is None:
-                    client = self.grayson_live[owner] = GraysonClient(
-                        self.out / "grayson-live" / owner, budget=self.cfg.grayson_calls_per_period)
-                outs = client.ask_many([r for *_, r in items])
-                asked += len(items)
-                for (w, q, avail, _), o in zip(items, outs):
-                    act = grayson_action(q, w["features"], o.get("answers") or {}, avail)
-                    if act:
-                        answers.append((w["key"], act))
-            reqs = range(asked)
-            if answers:
-                run.answer_external(answers)
-            self.log({"event": "grayson_live", "day": d, "asked": len(reqs), "answered": len(answers)})
+            if w["decision"] not in self.grayson_gates:
+                continue
+            owner, q = self.grayson_gates[w["decision"]]
+            if "questions" in q:
+                questions = {n: {"type": "choice", "instructions": v["instructions"], "criteria": v["criteria"]}
+                             for n, v in q["questions"].items()}
+            else:
+                crit = {a: m for a, m in q["criteria"].items() if a in avail}
+                if not crit:
+                    continue
+                questions = {"decision": {"type": "choice", "instructions": q["instructions"], "criteria": crit}}
+            req = {"data": w["features"] | {"decision": w["decision"]}, "questions": questions}
+            by_owner.setdefault(owner, []).append((w, q, avail, req))
+        for (owner, decision), items in sorted(by_wf.items()):
+            t0 = time.monotonic()
+            try:
+                acts = self.workflows[owner].decide(decision, [w["features"] | {"_actions": avail}
+                                                               for w, avail in items])
+            except WorkflowError as e:
+                raise ValueError(f"{decision}: {e}") from None
+            answers += [(w["key"], a) for (w, _), a in zip(items, acts)]
+            st = self.workflow_stats.setdefault(owner, {"cases": 0, "batches": 0, "seconds": 0.0, "actions": {}})
+            st["cases"] += len(items)
+            st["batches"] += 1
+            st["seconds"] = round(st["seconds"] + time.monotonic() - t0, 2)
+            for a in acts:
+                st["actions"][f"{decision}:{a}"] = st["actions"].get(f"{decision}:{a}", 0) + 1
+        asked = 0
+        for owner, items in by_owner.items():
+            client = self.broker.client(owner)
+            if client is None:
+                continue
+            outs = client.ask_many([r for *_, r in items])
+            asked += len(items)
+            for (w, q, avail, _), o in zip(items, outs):
+                act = grayson_action(q, w["features"], o.get("answers") or {}, avail)
+                if act:
+                    answers.append((w["key"], act))
+        if answers:
+            run.answer_external(answers)
+        self.log({"event": "outside_decisions", "day": d, "workflow": sum(len(v) for v in by_wf.values()),
+                  "grayson_asked": asked, "answered": len(answers)})
+        return len(answers)
+
+    def _set_workflow(self, owner: str, snap: Path | None) -> None:
+        """Puts `owner`'s workflow from the frozen bundle `snap` in force (None: no workflow)."""
+        from .workflow import Workflow
+        if self.wf_snap.get(owner) == snap and (snap is None or owner in self.workflows):
+            return
+        old = self.workflows.pop(owner, None)
+        if old is not None:
+            old.close()
+        for dcs in [d for d, o in self.workflow_dec.items() if o == owner]:
+            del self.workflow_dec[dcs]
+        self.wf_snap[owner] = snap
+        if snap is None:
+            return
+        p = next(p for p in self.players if p.name == owner)
+        wf = Workflow(owner, snap, snap, self.workspace(p), as_user=getattr(p.runner, "as_user", None),
+                      env=self.broker.env(owner), timeout_s=self.cfg.workflow_timeout_s)
+        self.workflows[owner] = wf
+        for dcs in wf.decisions:
+            self.workflow_dec[dcs] = owner
 
     def _grayson_queue(self, run, day: int) -> None:
         """Grayson works a defender's review queue: each simulated day, the held cases still pending go to Grayson
         with only their observable plain fields (the world's declarations), and its verdicts are set as the cases'
         `manual_verdict`, as a human review's would be (it doesn't use the human team's capacity)."""
         from .bundle import grayson_action
-        from .grayson import GraysonClient
         for owner, (inst, q) in self.queue_grayson.items():
             ecfg = self.cfg.for_institution(inst)
             fields = [f for f in self.engine.observable_scalars(ecfg, "review_case") if f != "manual_verdict"]
@@ -285,10 +357,9 @@ class Game:
                                               "criteria": {a: m for a, m in q["criteria"].items()
                                                            if a in ("release", "reject")}}}
                 reqs.append({"data": json.loads(json.dumps(data, default=str)), "questions": questions})
-            client = self.grayson_live.get(owner)
+            client = self.broker.client(owner)
             if client is None:
-                client = self.grayson_live[owner] = GraysonClient(
-                    self.out / "grayson-live" / owner, budget=self.cfg.grayson_calls_per_period)
+                continue
             outs = client.ask_many(reqs)
             done = 0
             for r, req, o in zip(cases, reqs, outs):
@@ -333,8 +404,6 @@ class Game:
                     "last_period": self.review_feedback.get(p.name, {"applied": 0, "refused": []})}
             self.last_tables[p.name] = data
             prompt = brief_text(ecfg, b, outcomes, st, first=first, families=self.engine.fraud_families(ecfg))
-            (ws / ".arena" / "grayson").mkdir(parents=True, exist_ok=True)
-            (ws / ".arena" / "grayson" / "calls.json").write_text(json.dumps({"used": 0}))
             self.engine.write_tables(game, ecfg, tag=p.name)
             return prompt, (lambda: self.engine.tool_server(game, ecfg, workspace=ws, tag=p.name))
         view = self.attacker.ring_view(game, p.target, max(cfg.start_day, b - cfg.period_days), b)
@@ -371,13 +440,40 @@ class Game:
         try:
             if p.side == "defender":
                 ecfg = self.cfg.for_institution(p.target)
-                bun = bundles.load(self.workspace(p) / "bundle", role=ecfg.role,
-                                   decisions=self.engine.decisions_of(ecfg))
-                if bun.digest != st.last_deploy:
+                bdir = self.workspace(p) / "bundle"
+                decisions = self.engine.decisions_of(ecfg)
+                bun = bundles.load(bdir, role=ecfg.role, decisions=decisions)
+                digest = bundles.digest_files(bdir, bun.digest)
+                if digest != st.last_deploy:
                     role_of = self.engine.role_of(ecfg)
                     policy = json.loads(json.dumps(bun.policy))
                     policy.pop("review_queue", None)
                     gray = bundles.take_grayson(policy)
+                    if (gray or (bun.policy.get("review_queue") or {}).get("grayson")) and not self.cfg.grayson:
+                        raise bundles.BundleError("Grayson isn't available in this game")
+                    snap, claimed = None, []
+                    if (bdir / "workflow.py").exists():
+                        from .workflow import Workflow, WorkflowError
+                        snap = self.sandbox / p.name / "deployed" / f"{b}-{digest[:12]}"
+                        try:
+                            probe = Workflow(p.name, bdir, snap, self.workspace(p),
+                                             as_user=getattr(p.runner, "as_user", None),
+                                             env=self.broker.env(p.name), timeout_s=self.cfg.workflow_timeout_s)
+                        except WorkflowError as e:
+                            raise bundles.BundleError(str(e)) from None
+                        claimed = probe.decisions
+                        probe.close()
+                        bad = [d for d in claimed if d not in decisions]
+                        if bad or not claimed:
+                            raise bundles.BundleError(
+                                f"workflow.py DECISIONS {bad or claimed} aren't this role's decision points: "
+                                f"{sorted(decisions)}")
+                        both = sorted(set(claimed) & set(gray))
+                        if both:
+                            raise bundles.BundleError(f"{both}: decided by workflow.py and by a grayson gate; pick one")
+                        ruled = {r["decision"] for r in policy.get("rules", [])}
+                        policy["rules"] = list(policy.get("rules", [])) + [
+                            bundles.external_rule(d) for d in claimed if d not in ruled]
                     for decision in [d for d, o in self.grayson_gates.items() if o[0] == p.name]:
                         del self.grayson_gates[decision]
                     for decision, q in gray.items():
@@ -399,10 +495,13 @@ class Game:
                         elif role in self.deployed:
                             game.undeploy(role)
                             del self.deployed[role]
-                    keep = self.out / "bundles" / f"{p.name}-{b}-{bun.digest[:12]}.json"
+                    self._set_workflow(p.name, snap)
+                    keep = self.out / "bundles" / f"{p.name}-{b}-{digest[:12]}.json"
                     keep.parent.mkdir(parents=True, exist_ok=True)
-                    keep.write_text(json.dumps({"policy": bun.policy, "notes": bun.notes}, default=str))
-                applied = st.last_deploy = bun.digest
+                    keep.write_text(json.dumps({"policy": bun.policy, "notes": bun.notes,
+                                                "workflow": (bdir / "workflow.py").read_text()[:200000]
+                                                if snap else None}, default=str))
+                applied = st.last_deploy = digest
             else:
                 plan_path = self.workspace(p) / "plan.json"
                 if not plan_path.exists():
@@ -492,12 +591,30 @@ class Game:
                    "players": [{"name": p.name, "side": p.side, "target": p.target, "runner": p.runner.name,
                                 "model": p.runner.model} for p in self.players],
                    "turns": [asdict(t) for t in self.turns], "tokens": tokens, "text": self._text_summary(),
+                   "decisioning": self._decisioning_summary(),
                    "finished": time.time()}
         tmp = self.out / "result.json.tmp"
         tmp.write_text(json.dumps(result, indent=2, default=str))
         tmp.rename(self.out / "result.json")
         return result
 
+
+    def _decisioning_summary(self) -> dict:
+        """How each defender decided: its workflow's cases and actions, and its Grayson calls (paid and cached)."""
+        out = {}
+        for p in self.players:
+            if p.side != "defender":
+                continue
+            paid = cached = 0
+            log = self.out / "grayson" / p.name / "log.jsonl"
+            if log.exists():
+                for line in log.read_text().splitlines():
+                    if line.strip():
+                        cached_ = json.loads(line).get("cached")
+                        paid, cached = paid + (not cached_), cached + bool(cached_)
+            out[p.name] = {"workflow": self.workflow_stats.get(p.name), "grayson_calls": paid,
+                           "grayson_cached": cached}
+        return out
 
     def _row_causes(self, game, b: int):
         """The run's truth as of the boundary, grader side: which rows the attacker rings caused (for their briefs),

@@ -17,6 +17,7 @@ dev = ["pytest>=8"]
 [project.scripts]
 fraud-arena = "fraud_arena.cli:main"
 fa-grayson = "fraud_arena.grayson:main"
+fa-workflow = "fraud_arena.workflow:test_main"
 
 [build-system]
 requires = ["setuptools>=69"]
