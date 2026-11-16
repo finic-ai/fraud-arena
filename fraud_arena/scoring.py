@@ -67,18 +67,14 @@ def window_score(truth: Path, accounts_institution: Path, *, institution: str, r
         select p.time, pe.institution, coalesce(p.cause_scenario, ''), p.payee, -p.amount
         from '{T}/postings.parquet' p join owners pe on pe.entity = p.payee
         where p.cause_kind = 'scenario' and p.amount > 0""")
-    # A merchant's fraud inflow is the fraudulent sale itself, which a refund or chargeback pays back while the goods
-    # are gone: netting would cancel the merchant's real loss, so merchants' accounts count gross outflow.
     merch = "(" + ", ".join(f"'{m}'" for m in MERCHANTS) + ")"
     rows = c.execute(f"""
         with acct as (
           select acct, any_value(institution) institution,
-                 case when any_value(institution) in {merch}
-                   then sum(case when amt > 0 and time >= timestamptz '{start}' and time < timestamptz '{end}'
-                                 then amt else 0 end)
-                   else greatest(sum(case when time < timestamptz '{end}' then amt else 0 end), 0)
-                      - greatest(sum(case when time < timestamptz '{start}' then amt else 0 end), 0) end loss
-          from flows where acct not in (select subject from launder) group by acct),
+                 greatest(sum(case when time < timestamptz '{end}' then amt else 0 end), 0)
+               - greatest(sum(case when time < timestamptz '{start}' then amt else 0 end), 0) loss
+          from flows where acct not in (select subject from launder) and institution not in {merch}
+          group by acct),
         share as (
           select acct, scen, sum(amt) out from flows
           where amt > 0 and time >= timestamptz '{start}' and time < timestamptz '{end}' group by all)
@@ -101,6 +97,7 @@ def window_score(truth: Path, accounts_institution: Path, *, institution: str, r
                sum(case when labelled then out_e - out_s else least(in_e, out_e) - least(in_s, out_s) end)::double
         from a where institution not in {"(" + ", ".join(f"'{m}'" for m in MERCHANTS) + ")"} group by 1""").fetchall()
     mule = dict(mule_rows)
+    rows = list(rows) + merchant_losses(c, T, merch, start, end)
     own, other, by_scenario = 0.0, 0.0, {}
     for inst, scen, amt in rows:
         if inst == institution:
@@ -123,6 +120,37 @@ def window_score(truth: Path, accounts_institution: Path, *, institution: str, r
             good += 1
             friction += weights.action_cost(action, amount)
     return WindowScore(own, friction, good, fraud, other, by_scenario, float(mule.get(institution) or 0.0))
+
+
+def merchant_losses(c, T: str, merch: str, start: str, end: str) -> list[tuple[str, str, float]]:
+    """A merchant hands over goods, so the fraudulent sale it was paid doesn't offset a refund, chargeback or credit
+    it pays out (netting would cancel every merchant loss). Per fraud instance: its scenario-caused payments out of
+    the merchant, less cancellations (an order declined or cancelled is a reversal to the same card account, same
+    amount, within the hour after the sale: no goods left) and less reversals it wins back (a chargeback it wins:
+    money from a counterparty it paid in that instance, after the payment)."""
+    cols = {r[0] for r in c.execute(f"describe select * from '{T}/postings.parquet'").fetchall()}
+    if "cause_instance" not in cols:
+        return []
+    return c.execute(f"""
+        with p as (
+          select p.time, p.payer, p.payee, p.amount, p.cause_instance inst, coalesce(p.cause_scenario, '') scen,
+                 po.institution pi, pe.institution qi
+          from '{T}/postings.parquet' p left join owners po on po.entity = p.payer
+          left join owners pe on pe.entity = p.payee
+          where p.cause_kind = 'scenario' and p.amount > 0 and p.time < timestamptz '{end}'),
+        outs as (
+          select o.* from p o
+          where o.pi in {merch} and (o.qi is null or o.qi <> o.pi)
+            and o.time >= timestamptz '{start}'
+            and not exists (select 1 from p s where s.inst = o.inst and s.payer = o.payee and s.qi = o.pi
+                            and s.amount = o.amount and s.time <= o.time and s.time >= o.time - interval 1 hour)),
+        wins as (
+          select o.pi, o.inst, sum(w.amount) won from outs o join p w
+            on w.inst = o.inst and w.payer = o.payee and w.qi = o.pi and w.time > o.time
+          group by all)
+        select o.pi, o.scen, greatest(sum(o.amount) - coalesce(any_value(w.won), 0), 0)::double
+        from outs o left join wins w on w.pi = o.pi and w.inst = o.inst
+        group by o.pi, o.scen, o.inst""").fetchall()
 
 
 @dataclass

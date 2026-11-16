@@ -298,14 +298,25 @@ def test_merchant_chargebacks_are_losses_despite_the_fraudulent_sale(tmp_path):
     t.mkdir()
     when = [datetime(2026, 7, 1, tzinfo=timezone.utc), datetime(2026, 7, 20, tzinfo=timezone.utc)]
     # A stolen card buys $100 at Kellmont; the issuer charges it back from Kellmont's account.
-    _write(t / "postings.parquet", {"key": ["e1", "e2"], "time": when, "payer": ["card_v", "kell_acct"],
-                                    "payee": ["kell_acct", "card_v"], "amount": [100.0, 100.0], "dirty": [0.0, 0.0],
-                                    "cause_kind": ["scenario", "scenario"], "cause_scenario": ["cnp_fraud", "cnp_fraud"]})
+    from datetime import timedelta
+    t0 = when[0]
+    # Instance i1: a stolen card buys $100 and is charged back 19 days later (a loss). Instance i2: a $50 fraud order
+    # declined and reversed 5 minutes after the sale (no goods: not a loss). Instance i3: a $30 chargeback the
+    # merchant later wins back (not a loss).
+    _write(t / "postings.parquet", {
+        "key": ["e1", "e2", "e3", "e4", "e5", "e6", "e7"],
+        "time": [t0, when[1], t0, t0 + timedelta(minutes=5), t0, t0 + timedelta(days=10), t0 + timedelta(days=20)],
+        "payer": ["card_v", "kell_acct", "card_x", "kell_acct", "card_y", "kell_acct", "issuer"],
+        "payee": ["kell_acct", "card_v", "kell_acct", "card_x", "kell_acct", "issuer", "kell_acct"],
+        "amount": [100.0, 100.0, 50.0, 50.0, 30.0, 30.0, 30.0], "dirty": [0.0] * 7,
+        "cause_kind": ["scenario"] * 7, "cause_scenario": ["cnp_fraud"] * 7,
+        "cause_instance": ["i1", "i1", "i2", "i2", "i3", "i3", "i3"]})
     _write(t / "labels.parquet", {"label": ["cnp_fraud"], "subject": ["card_v"]})
     _write(t / "events.parquet", {"key": ["e1"], "cause_kind": ["scenario"]})
     _write(t / "decisions.parquet", {"key": ["z"], "time": when[:1], "role": ["r"], "action": ["approve"],
                                      "decision": ["x"]})
-    _write(tmp_path / "owners.parquet", {"entity": ["card_v", "kell_acct"], "institution": ["arbelton", "kellmont"]})
+    _write(tmp_path / "owners.parquet", {"entity": ["card_v", "card_x", "card_y", "kell_acct", "issuer"],
+                                         "institution": ["arbelton", "arbelton", "arbelton", "kellmont", "arbelton"]})
     kw = dict(role="r", start="2026-06-01T00:00:00Z", end="2026-08-01T00:00:00Z", weights=ScoreWeights())
     k = window_score(t, tmp_path / "owners.parquet", institution="kellmont", **kw)
     assert k.losses == 100.0 and k.losses_by_scenario == {"cnp_fraud": 100.0}
