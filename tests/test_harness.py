@@ -320,3 +320,23 @@ def test_merchant_chargebacks_are_losses_despite_the_fraudulent_sale(tmp_path):
     kw = dict(role="r", start="2026-06-01T00:00:00Z", end="2026-08-01T00:00:00Z", weights=ScoreWeights())
     k = window_score(t, tmp_path / "owners.parquet", institution="kellmont", **kw)
     assert k.losses == 100.0 and k.losses_by_scenario == {"cnp_fraud": 100.0}
+
+
+def test_a_later_order_on_the_same_card_is_not_a_won_chargeback(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    t = tmp_path / "truth"
+    t.mkdir()
+    t0 = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    # One instance: order $40, refund $40 two days later, then a new order $60 from the same card.
+    _write(t / "postings.parquet", {
+        "key": ["a", "b", "c"], "time": [t0, t0 + timedelta(days=2), t0 + timedelta(days=3)],
+        "payer": ["card", "hop", "card"], "payee": ["hop", "card", "hop"], "amount": [40.0, 40.0, 60.0],
+        "dirty": [0.0] * 3, "cause_kind": ["scenario"] * 3, "cause_scenario": ["refund_abuse"] * 3,
+        "cause_instance": ["i"] * 3})
+    _write(t / "labels.parquet", {"label": ["x"], "subject": ["y"]})
+    _write(t / "events.parquet", {"key": ["a"], "cause_kind": ["scenario"]})
+    _write(t / "decisions.parquet", {"key": ["z"], "time": [t0], "role": ["r"], "action": ["approve"],
+                                     "decision": ["x"]})
+    _write(tmp_path / "owners.parquet", {"entity": ["card", "hop"], "institution": ["arbelton", "hopcrate"]})
+    kw = dict(role="r", start="2026-06-01T00:00:00Z", end="2026-08-01T00:00:00Z", weights=ScoreWeights())
+    assert window_score(t, tmp_path / "owners.parquet", institution="hopcrate", **kw).losses == 40.0

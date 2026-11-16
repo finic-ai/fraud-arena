@@ -124,33 +124,51 @@ def window_score(truth: Path, accounts_institution: Path, *, institution: str, r
 
 def merchant_losses(c, T: str, merch: str, start: str, end: str) -> list[tuple[str, str, float]]:
     """A merchant hands over goods, so the fraudulent sale it was paid doesn't offset a refund, chargeback or credit
-    it pays out (netting would cancel every merchant loss). Per fraud instance: its scenario-caused payments out of
-    the merchant, less cancellations (an order declined or cancelled is a reversal to the same card account, same
-    amount, within the hour after the sale: no goods left) and less reversals it wins back (a chargeback it wins:
-    money from a counterparty it paid in that instance, after the payment)."""
+    it pays out (netting would cancel every merchant loss). Per fraud instance, its scenario-caused payments out of the
+    merchant in the window, less:
+    - cancellations: a payment to a counterparty that paid the merchant the same amount, in the same instance, within
+      the hour before it (an order declined or cancelled is reversed; no goods left);
+    - wins: an inflow, after a payment, from the counterparty it paid, of the same amount, matched one to one (a
+      chargeback or dispute the merchant wins back). A later order from the same card is a new sale, not a win."""
     cols = {r[0] for r in c.execute(f"describe select * from '{T}/postings.parquet'").fetchall()}
     if "cause_instance" not in cols:
         return []
-    return c.execute(f"""
-        with p as (
-          select p.time, p.payer, p.payee, p.amount, p.cause_instance inst, coalesce(p.cause_scenario, '') scen,
-                 po.institution pi, pe.institution qi
-          from '{T}/postings.parquet' p left join owners po on po.entity = p.payer
-          left join owners pe on pe.entity = p.payee
-          where p.cause_kind = 'scenario' and p.amount > 0 and p.time < timestamptz '{end}'),
-        outs as (
-          select o.* from p o
-          where o.pi in {merch} and (o.qi is null or o.qi <> o.pi)
-            and o.time >= timestamptz '{start}'
-            and not exists (select 1 from p s where s.inst = o.inst and s.payer = o.payee and s.qi = o.pi
-                            and s.amount = o.amount and s.time <= o.time and s.time >= o.time - interval 1 hour)),
-        wins as (
-          select o.pi, o.inst, sum(w.amount) won from outs o join p w
-            on w.inst = o.inst and w.payer = o.payee and w.qi = o.pi and w.time > o.time
-          group by all)
-        select o.pi, o.scen, greatest(sum(o.amount) - coalesce(any_value(w.won), 0), 0)::double
-        from outs o left join wins w on w.pi = o.pi and w.inst = o.inst
-        group by o.pi, o.scen, o.inst""").fetchall()
+    rows = c.execute(f"""
+        select epoch(p.time), p.payer, p.payee, p.amount::double, p.cause_instance, coalesce(p.cause_scenario, ''),
+               po.institution, pe.institution
+        from '{T}/postings.parquet' p left join owners po on po.entity = p.payer
+        left join owners pe on pe.entity = p.payee
+        where p.cause_kind = 'scenario' and p.amount > 0 and p.time < timestamptz '{end}'
+          and (po.institution in {merch} or pe.institution in {merch})
+        order by p.cause_instance, p.time""").fetchall()
+    start_t = c.execute(f"select epoch(timestamptz '{start}')").fetchone()[0]
+    by_inst: dict = {}
+    for r in rows:
+        by_inst.setdefault(r[4], []).append(r)
+    out: dict[tuple[str, str], float] = {}
+    hour = 3600
+    for inst, ps in by_inst.items():
+        sales = [r for r in ps if r[7] in MERCHANTS and r[6] != r[7]]
+        pays = [r for r in ps if r[6] in MERCHANTS and r[6] != r[7]]
+        used_sales, open_pays, loss = set(), [], {}
+        for o in pays:
+            cancel = next((i for i, s_ in enumerate(sales) if i not in used_sales and s_[1] == o[2]
+                           and s_[7] == o[6] and abs(s_[3] - o[3]) < 0.005
+                           and 0 <= o[0] - s_[0] <= hour), None)
+            if cancel is not None:
+                used_sales.add(cancel)
+                continue
+            open_pays.append(o)
+        for w in sales:
+            match = next((o for o in open_pays if o[2] == w[1] and o[6] == w[7] and abs(o[3] - w[3]) < 0.005
+                          and o[0] < w[0]), None)
+            if match is not None:
+                open_pays.remove(match)
+        for o in open_pays:
+            if o[0] >= start_t:
+                k = (o[6], o[5])
+                out[k] = out.get(k, 0.0) + o[3]
+    return [(inst, scen, amt) for (inst, scen), amt in out.items()]
 
 
 @dataclass
