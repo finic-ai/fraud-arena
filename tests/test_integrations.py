@@ -257,7 +257,7 @@ def test_the_game_decides_cases_inline_when_the_engine_calls_it(tmp_path, monkey
     from fraud_arena import grayson
     monkeypatch.setattr(grayson.Broker, "client", lambda self, player: g)
     cfg = GameConfig(world=Path("w.yaml"), seed=1, start_day=180, period_days=2, horizon_days=2, settle_days=0,
-                     manual_review=False)
+                     manual_review=False, outside_mode="inline")
     d = Player("defender-brindlemark", "defender", "brindlemark", Scripted("claude-code", bundle))
     game = Game(cfg, E(), [d], tmp_path / "out", tmp_path / "sb", attacker_api=Attackers(), log=lambda r: None)
     game.run()

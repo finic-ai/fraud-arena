@@ -109,7 +109,7 @@ def game(a) -> int:
                      start_day=a.start_day, period_days=a.period_days, horizon_days=a.horizon_days,
                      grayson_calls_per_period=a.grayson_budget, grayson=a.grayson == "on",
                      settle_days=a.settle_days, workflow_timeout_s=a.workflow_timeout,
-                     workflows=a.workflows == "on",
+                     workflows=a.workflows == "on", outside_mode=a.outside_mode,
                      text_generator=_text_generator_spec(a), attacker_text=a.attacker_text == "on",
                      text_cache=Path(a.text_cache).expanduser(), replay=a.replay == "on" or a.watch)
     engine = RunmereEngine(Path(a.sandbox))
@@ -174,6 +174,8 @@ def main(argv=None) -> int:
     q.add_argument("--grayson", choices=["on", "off"], default="on", help="off: the no-Grayson game")
     q.add_argument("--workflows", choices=["on", "off"], default="on",
                    help="off: no workflow.py (an engine without external decisions at event gates)")
+    q.add_argument("--outside-mode", choices=["batch", "inline"], default="batch",
+                   help="inline: the engine calls the harness at the gate (opt in; needs Run.set_outside)")
     q.add_argument("--workflow-timeout", type=float, default=600.0, help="seconds per batch of a workflow.py")
     q.add_argument("--text-generator", default="none",
                    help="claude-code:sonnet|claude-code:opus|codex:<model>|none: rewrites the defenders' rich text")

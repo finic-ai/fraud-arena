@@ -70,6 +70,9 @@ class GameConfig:
     # False is the no-Grayson game: the broker refuses every call and the brief says Grayson isn't available.
     grayson: bool = True
     workflow_timeout_s: float = 600.0
+    # How outside decisions reach the harness: "inline" registers a synchronous decider the engine calls at the gate
+    # (needs an engine with `Run.set_outside`); "batch" leaves the engine's stop-and-answer path.
+    outside_mode: str = "batch"
     # False when the engine can't hand event-gate cases out yet: workflow.py isn't offered or deployed.
     workflows: bool = True
     max_waits: int = 20
@@ -279,7 +282,9 @@ class Game:
         bundle that ran (or its built-in policy), the defender hears why next period, and the period runs again."""
         for _ in range(len(self.deployed) + 2):
             trial = game.fork()
-            if hasattr(trial, "set_outside"):
+            if self.cfg.outside_mode == "inline":
+                if not hasattr(trial, "set_outside"):
+                    raise RuntimeError("outside_mode inline needs an engine with Run.set_outside")
                 trial.set_outside(self._decide_case)
             try:
                 self._run_with_grayson(trial, day)
