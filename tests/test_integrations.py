@@ -208,3 +208,59 @@ def test_live_lookups_filter_the_observer_rows_at_the_cases_time(tmp_path):
     assert rows[1] == [(1,)]
     with pytest.raises(Exception):
         integ._sql_over(pa.table({"a": [1]}), "select * from read_csv('/etc/hosts')", {})
+
+
+class Calling(Run):
+    """An engine with a synchronous outside decider: at each day's gate cases it calls the registered function,
+    from four threads at once, and never stops the run."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.fn, self.answers = None, {}
+
+    def set_outside(self, fn): self.fn = fn
+
+    def run_until_day(self, d):
+        from concurrent.futures import ThreadPoolExecutor
+        while self.day < d:
+            self.day += 1
+            dep = self.deployed.get("brind_defender") or {}
+            if self.fn and "outside" in dep:
+                cases = [{"key": f"k{self.day}-{i}", "decision": "brind_card_auth", "gate": "event",
+                          "needs": ["scam"] if i % 2 else [], "time": 0, "features": {"amount": 100 * i},
+                          "identifiers": {}, "actions": ["approve", "decline"], "default_action": "approve"}
+                         for i in range(8)]
+                with ThreadPoolExecutor(4) as pool:
+                    for c, a in zip(cases, pool.map(lambda c: self.fn(c, None), cases)):
+                        self.answers[c["key"]] = a
+        return 0
+
+    def fork(self):
+        r = Calling(self.day, self.deployed, self.plans)
+        r.answers = dict(self.answers)
+        return r
+
+
+def test_the_game_decides_cases_inline_when_the_engine_calls_it(tmp_path, monkeypatch):
+    class E(Engine):
+        def start(self, cfg): return Calling()
+        def write_live(self, run, cfg, dest, rewrite=None): _tables(dest)
+        def decision_points(self, cfg): return []
+
+    def bundle(ws):
+        (ws / "bundle").mkdir(parents=True, exist_ok=True)
+        (ws / "bundle" / "policy.yaml").write_text(json.dumps({
+            "rules": [{"decision": "brind_card_auth", "when": "outside.scam.yes > 0.5", "action": "decline"}],
+            "integrations": {"scam": {"source": "grayson", "criteria": {"yes": "a", "no": "b"}}}}))
+
+    g = FakeGrayson()
+    from fraud_arena import grayson
+    monkeypatch.setattr(grayson.Broker, "client", lambda self, player: g)
+    cfg = GameConfig(world=Path("w.yaml"), seed=1, start_day=180, period_days=2, horizon_days=2, settle_days=0,
+                     manual_review=False)
+    d = Player("defender-brindlemark", "defender", "brindlemark", Scripted("claude-code", bundle))
+    game = Game(cfg, E(), [d], tmp_path / "out", tmp_path / "sb", attacker_api=Attackers(), log=lambda r: None)
+    game.run()
+    assert len(g.reqs) == 8  # 2 days x 4 cases that needed `scam`
+    log = (tmp_path / "out" / "grayson-live" / "defender-brindlemark.jsonl").read_text().splitlines()
+    assert len(log) == 8 and all(json.loads(l)["given"] == {"yes": 0.9, "no": 0.1} for l in log)

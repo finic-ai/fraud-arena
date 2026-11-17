@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -123,9 +124,10 @@ class Game:
         self.integrations: dict[str, object] = {}  # defender -> its integrations Resolver
         self._kinds: dict[str, dict[str, str]] | None = None
         self.good_integrations: dict[str, object] = {}
+        self._stats_lock = threading.Lock()
+        self._log_lock = threading.Lock()
         self._cur_day = 0
         self._run_now = None
-        import threading
         self._text_lock = threading.Lock()
         self.queue_grayson: dict[str, tuple[str, dict]] = {}  # defender -> (institution, grayson config)
         self.textgen = textgen if textgen is not None else _textgen(cfg, Path(out))
@@ -277,6 +279,8 @@ class Game:
         bundle that ran (or its built-in policy), the defender hears why next period, and the period runs again."""
         for _ in range(len(self.deployed) + 2):
             trial = game.fork()
+            if hasattr(trial, "set_outside"):
+                trial.set_outside(self._decide_case)
             try:
                 self._run_with_grayson(trial, day)
             except ValueError as e:
@@ -493,6 +497,52 @@ class Game:
             st["defaulted"] += len(defaulted)
         return len(answers)
 
+    def _decide_case(self, case: dict, view=None):
+        """The engine's synchronous outside decider: called at the gate, mid-step, possibly from several threads at
+        once. Returns the needed features (integrations) or an action (a workflow, a Grayson gate config, or the
+        gate's default)."""
+        from .bundle import grayson_action
+        from .workflow import WorkflowError
+        if case.get("needs"):
+            return self._answer_features([case], run=view)[case["key"]]
+        avail = list(case.get("available") or case["actions"])
+        owner = self.workflow_dec.get(case["decision"])
+        if owner is not None:
+            wf = self.workflows[owner]
+            t0 = time.monotonic()
+            try:
+                with wf.lock:
+                    act = wf.decide(case["decision"], [case["features"] | {"_actions": avail}])[0]
+            except WorkflowError as e:
+                raise ValueError(f"{case['decision']}: {e}") from None
+            with self._stats_lock:
+                st = self.workflow_stats.setdefault(owner, {"cases": 0, "batches": 0, "seconds": 0.0, "actions": {}})
+                st["cases"] += 1
+                st["batches"] += 1
+                st["seconds"] += time.monotonic() - t0
+                k = f"{case['decision']}:{act}"
+                st["actions"][k] = st["actions"].get(k, 0) + 1
+            return act
+        if case["decision"] in self.grayson_gates:
+            owner, q = self.grayson_gates[case["decision"]]
+            client = self.broker.client(owner)
+            if client is not None:
+                if "questions" in q:
+                    questions = {n: {"type": "choice", "instructions": v["instructions"], "criteria": v["criteria"]}
+                                 for n, v in q["questions"].items()}
+                else:
+                    questions = {"decision": {"type": "choice", "instructions": q["instructions"],
+                                              "criteria": {a: m for a, m in q["criteria"].items() if a in avail}}}
+                req = {"data": self._case_view(case) | {"decision": case["decision"]}, "questions": questions}
+                o = client.ask_many([req])[0]
+                act = grayson_action(q, case["features"], o.get("answers") or {}, avail)
+                self._log_live(owner, float(self._cur_day), [{"where": case["decision"], "data": req["data"],
+                                                             "answers": o.get("answers"), "error": o.get("error"),
+                                                             "action": act}])
+                if act:
+                    return act
+        return case.get("default_action") or avail[0]
+
     # Case features holding text the harness rewrites with a model before players see it (textgen RICH columns:
     # applications' free text, claim statements, return comments, beneficiary-change notes). In a waiting case they
     # are still the world's template text, which gives fraud away, so outside code doesn't get them; short routine
@@ -517,7 +567,7 @@ class Game:
         feats = {k: v for k, v in (w.get("features") or {}).items() if k not in self.RICH_CASE_TEXT}
         return feats | {k: v for k, v in (w.get("identifiers") or {}).items() if v is not None}
 
-    def _answer_features(self, cases: list[dict]) -> dict[str, dict]:
+    def _answer_features(self, cases: list[dict], run=None) -> dict[str, dict]:
         """Values for the outside features cases wait for, from their defenders' integrations; a feature no
         integration gives (or one that failed) gets no information: uniform options, or 0."""
         if not cases:
@@ -529,7 +579,7 @@ class Game:
         out: dict[str, dict] = {}
         for owner, cs in by_owner.items():
             res = self.integrations.get(owner)
-            got = res.answer(cs, run=self._run_now) if res is not None else {}
+            got = res.answer(cs, run=run if run is not None else self._run_now) if res is not None else {}
             for c in cs:
                 ans = got.get(c["key"], {})
                 for n in c["needs"]:
@@ -596,7 +646,7 @@ class Game:
             return
         f = self.out / "grayson-live" / f"{owner}.jsonl"
         f.parent.mkdir(parents=True, exist_ok=True)
-        with open(f, "a") as fh:
+        with self._log_lock, open(f, "a") as fh:
             for r in rows:
                 fh.write(json.dumps({"day": round(day, 4)} | r, default=str) + "\n")
 

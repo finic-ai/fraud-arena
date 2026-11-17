@@ -64,6 +64,8 @@ class Workflow:
         if "error" in ready:
             self.close()
             raise WorkflowError(f"workflow.py didn't start: {ready['error']}")
+        import threading
+        self.lock = threading.Lock()  # one batch at a time: the engine may call from several threads
         self.decisions = [str(d) for d in ready.get("decisions") or []]
         self.reviews = bool(ready.get("review"))
         self.review_kinds = [str(k) for k in ready.get("review_kinds") or []]

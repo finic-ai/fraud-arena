@@ -254,46 +254,49 @@ class Resolver:
                  observer: str | None = None, public_observer: str = "public"):
         self.integrations = integrations
         self.observer, self.public_observer = observer, public_observer
-        self.run = None
+        import threading
+        self._lock = threading.Lock()
         self.data = data
         self.client = grayson_client
         self.case_view = case_view or (lambda case: case.get("features") or {})
         self.log = log or (lambda rows: None)
         self.stats = {"lookups": 0, "lookup_errors": 0, "grayson": 0, "grayson_errors": 0}
 
-    def _lookup(self, i: Integration, case: dict) -> tuple[list[str], list[tuple]] | None:
+    def _count(self, k: str, n: int = 1) -> None:
+        with self._lock:
+            self.stats[k] += n
+
+    def _lookup(self, i: Integration, case: dict, run=None) -> tuple[list[str], list[tuple]] | None:
         values = {p: _param_value(ref, case) for p, ref in i.params.items()}
         values["now"] = _iso(case.get("time"))
-        self.stats["lookups"] += 1
+        self._count("lookups")
         try:
             if i.table is not None:
-                if self.run is None or not hasattr(self.run, "observer_rows"):
+                if run is None or not hasattr(run, "observer_rows"):
                     raise IntegrationError("live lookups need a run with observer_rows")
                 now = (datetime.fromtimestamp(case["time"] / 1000, tz=timezone.utc).replace(tzinfo=None)
                        if case.get("time") is not None else None)
                 where = {c: _bind(v, values, now) for c, v in i.where.items()}
                 obs = self.public_observer if i.source == "public" else self.observer
-                rows = self.run.observer_rows(obs, i.table, where=where or None, columns=i.columns,
+                rows = run.observer_rows(obs, i.table, where=where or None, columns=i.columns,
                                               limit=i.limit, newest_first=i.newest_first)
                 if i.sql:
                     return _sql_over(rows, i.sql, values)
                 return rows.column_names, [tuple(r.values()) for r in rows.to_pylist()][:MAX_ROWS]
             return self.data.query(i.sql, values)
         except Exception:
-            self.stats["lookup_errors"] += 1
+            self._count("lookup_errors")
             return None
 
     def answer(self, cases: list[dict], run=None) -> dict[str, dict]:
         """`{case key: {feature: value}}` for every feature each case needs that is one of these integrations."""
-        if run is not None:
-            self.run = run
         out: dict[str, dict] = {}
         rows_cache: dict[tuple[str, str], tuple | None] = {}
 
         def rows(name, case):
             k = (name, case["key"])
             if k not in rows_cache:
-                rows_cache[k] = self._lookup(self.integrations[name], case)
+                rows_cache[k] = self._lookup(self.integrations[name], case, run)
             return rows_cache[k]
 
         asks = []
@@ -325,12 +328,12 @@ class Resolver:
                 [{"error": "Grayson isn't available in this game"} for _ in asks]
             logged = []
             for (c, i, req), o in zip(asks, outs):
-                self.stats["grayson"] += 1
+                self._count("grayson")
                 probs = ((o.get("answers") or {}).get(i.name) or {}).get("probabilities") or {}
                 p = {opt: float(probs.get(opt, 0.0)) for opt in i.options}
                 tot = sum(p.values())
                 if "error" in o or tot <= 0:
-                    self.stats["grayson_errors"] += 1
+                    self._count("grayson_errors")
                     p = {opt: 1.0 / len(i.options) for opt in i.options}  # no answer: no information
                 else:
                     p = {k: v / tot for k, v in p.items()}
