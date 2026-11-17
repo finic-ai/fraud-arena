@@ -34,6 +34,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SOURCES = {"own_data", "public", "grayson"}
+# Deployment formats (runmere SPEC): 2 adds `external`, 3 lets an event gate's `external` entry have no timeout,
+# 4 adds `outside` features.
+FORMAT_EXTERNAL_EVENT, FORMAT_OUTSIDE = 3, 4
 PARAM = re.compile(r"\$([a-z_][a-z0-9_]*)")
 MAX_ROWS = 50
 
@@ -129,7 +132,7 @@ def declare(policy: dict, integrations: dict[str, Integration]) -> set[str]:
             used |= got
             policy.setdefault("external", {}).setdefault(r["decision"], {})
     if used:
-        policy["format"] = max(int(policy.get("format", 1)), 2)
+        policy["format"] = max(int(policy.get("format", 1)), FORMAT_OUTSIDE)
         outside = policy.setdefault("outside", {})
         for n in used:
             i = integrations[n]

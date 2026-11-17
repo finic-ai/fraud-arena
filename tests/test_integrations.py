@@ -31,7 +31,7 @@ def test_only_integrations_the_rules_read_become_engine_features():
     ints = integ.parse(pol)
     assert "integrations" not in pol and set(ints) == {"claims", "unused", "scam"}
     used = integ.declare(pol, ints)
-    assert used == {"claims", "scam"} and pol["format"] == 2
+    assert used == {"claims", "scam"} and pol["format"] == 4
     assert pol["outside"] == {"claims": {"type": "number"}, "scam": {"options": ["yes", "no"]}}
     assert pol["external"] == {"brind_card_auth": {}}
 

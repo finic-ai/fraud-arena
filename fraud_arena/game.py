@@ -846,6 +846,8 @@ class Game:
                             f"config decides them")
                     for d in sent_out:
                         policy.setdefault("external", {}).setdefault(d, {})
+                    if policy.get("external"):
+                        policy["format"] = max(int(policy.get("format", 1)), integ.FORMAT_EXTERNAL_EVENT)
                     for decision in [d for d, o in self.grayson_gates.items() if o[0] == p.name]:
                         del self.grayson_gates[decision]
                     for decision, q in gray.items():
