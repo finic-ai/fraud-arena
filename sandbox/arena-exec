@@ -1,0 +1,13 @@
+#!/usr/bin/python3 -I
+# Starts a player's session as the player, with the environment the harness wrote to a file in the player's folder
+# (fraud_arena/sandbox.py), so no secret is on a command line. Installed to /usr/local/bin by setup-box.sh.
+import json
+import os
+import pwd
+import sys
+
+with open(sys.argv[1]) as f:
+    env = json.load(f)
+pw = pwd.getpwuid(os.getuid())
+env |= {"HOME": pw.pw_dir, "USER": pw.pw_name, "LOGNAME": pw.pw_name}
+os.execvpe(sys.argv[2], sys.argv[2:], env)

@@ -2,7 +2,12 @@
 
     fraud-arena pilot --world worlds/fraud-world/world.yaml --out /home/ubuntu/pilot --sandbox /srv/arena \
         --defender claude-code:sonnet --defender codex:gpt-6.1-sol --roots 2280 --start-day 180 \
-        --period-days 30 --horizon-days 120 --seed 1000 --agent-user agent --proxy http://127.0.0.1:3128
+        --period-days 30 --horizon-days 120 --seed 1000
+
+Each defender runs as its own player user (arena-p1, arena-p2, ...; sandbox/setup-box.sh). `--credentials
+subscription` (the default) runs on CLAUDE_CODE_OAUTH_TOKEN and the Codex login; `--credentials api-key
+--model-budget-tokens N` sends every model call through the model gateway, which holds ANTHROPIC_API_KEY and
+OPENAI_API_KEY, so no key, token or login reaches a player.
 """
 from __future__ import annotations
 
@@ -17,35 +22,93 @@ from .queue import Job, Queue
 from .runners import RUNNERS
 
 
-def _runner(spec: str, a):
-    kind, model = spec.split(":", 1)
+def _users(a) -> list[str | None]:
+    return [f"arena-p{n}" for n in range(1, 13)] if a.player_users else [None] * 12
+
+
+CODEX_USER, CODEX_HOME = "arena-codex", "/home/arena-codex/.codex"
+
+
+def _gateway(a, specs: list[str | None]):
+    """With `--credentials api-key`, the run's model gateway, for the models these runner:model specs name; None
+    with subscriptions or when no player calls a model."""
+    from .gateway import RUNNER_PROVIDER, Gateway
+
+    models = {s.split(":", 1)[1] for s in specs if s and s.split(":", 1)[0] in RUNNER_PROVIDER}
+    if a.credentials != "api-key" or not models:
+        return None
+    if not a.model_budget_tokens:
+        raise SystemExit("a run with model players needs --model-budget-tokens: the token budget the owner approved")
+    return Gateway(Path(a.out) / "gateway" / "usage.jsonl", models=models, budget_tokens=a.model_budget_tokens)
+
+
+def _credentials(a, kind: str, name: str, user: str | None, gateway) -> tuple[dict[str, str], str | None, str | None]:
+    """A session's model access: (environment, Unix user, proxy).
+
+    - `api-key`: the gateway's address and the caller's own gateway token; the keys stay with the harness.
+    - `subscription`: Claude Code gets CLAUDE_CODE_OAUTH_TOKEN, through a file in its own folder, never on a command
+      line, and reaches the providers through the proxy. Every Codex session runs as `arena-codex` with its one
+      ChatGPT login (copies of a login invalidate each other), so Codex players share that user and its folders.
+    """
+    if a.credentials == "api-key":
+        return (gateway.env(name, kind) if gateway is not None else {}), user, None
     env = {}
-    if kind == "claude-code" and os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+    if kind == "claude-code":
+        if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            raise SystemExit("--credentials subscription needs CLAUDE_CODE_OAUTH_TOKEN for Claude Code players")
         env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
-    env |= {"FA_GRAYSON_STATE": ".arena/grayson", "FA_GRAYSON_BUDGET": str(a.grayson_budget)}
-    if os.environ.get("GRAYSON_API_KEY"):
-        env["GRAYSON_API_KEY"] = os.environ["GRAYSON_API_KEY"]
-    return RUNNERS[kind](model, extra_env=env, as_user=a.agent_user, proxy=a.proxy, timeout_s=a.session_timeout)
+    if kind == "codex" and user is not None:
+        user, env["CODEX_HOME"] = CODEX_USER, CODEX_HOME
+    return env, user, a.proxy
+
+
+def _runner(spec: str, a, name: str, user: str | None, gateway, broker):
+    kind, model = spec.split(":", 1)
+    if kind == "baseline":
+        return RUNNERS[kind](model)
+    env, user, proxy = _credentials(a, kind, name, user, gateway)
+    return RUNNERS[kind](model, extra_env=broker.env(name) | env, as_user=user, proxy=proxy,
+                         timeout_s=a.session_timeout)
 
 
 def pilot(a) -> int:
     from .engine import RunmereEngine
+    from .sandbox import private_dir
+
+    from .grayson import Broker
 
     jobs = []
+    users = iter(_users(a))
+    gateway = _gateway(a, [s for s in a.defender if s != "reference"])
+    brokers = []
     for spec in a.defender:
         cfg = EpisodeConfig(world=Path(a.world), institution=a.institution, seed=a.seed, roots=a.roots,
                             partitions=a.partitions, start_day=a.start_day, period_days=a.period_days,
                             horizon_days=a.horizon_days, grayson_calls_per_period=a.grayson_budget)
         name = spec.replace(":", "-")
-        sandbox = Path(a.sandbox) / name
-        eng = RunmereEngine(sandbox, agent_user=a.agent_user)
+        # Grayson's key stays with the grader: each defender has its own broker, its budget per period.
+        broker = Broker(Path(a.out) / name / "grayson", budget=a.grayson_budget,
+                        enabled=bool(os.environ.get("GRAYSON_API_KEY")))
+        brokers.append(broker)
+        runner = None if spec == "reference" else _runner(spec, a, name, next(users), gateway, broker)
+        sandbox = private_dir(Path(a.sandbox) / name, getattr(runner, "as_user", None))
+        eng = RunmereEngine(sandbox)
         ws = sandbox / f"{cfg.institution}-s{cfg.seed}" / "workspace"
         ws.mkdir(parents=True, exist_ok=True)
-        ep = Episode(cfg, eng, None if spec == "reference" else _runner(spec, a), Path(a.out) / name, workspace=ws,
-                     on_period=lambda r, n=name: print(json.dumps({"episode": n, **r.__dict__}, default=str),
-                                                       flush=True))
+
+        def on_period(r, n=name, b=broker):
+            b.reset_period()
+            print(json.dumps({"episode": n, **r.__dict__}, default=str), flush=True)
+
+        ep = Episode(cfg, eng, runner, Path(a.out) / name, workspace=ws, on_period=on_period)
         jobs.append(Job(name, spec.split(":")[0], ep.run))
-    results = Queue(Path(a.out) / "queue.jsonl", parallel=a.parallel).run(jobs)
+    try:
+        results = Queue(Path(a.out) / "queue.jsonl", parallel=a.parallel).run(jobs)
+    finally:
+        for b in brokers:
+            b.close()
+        if gateway is not None:
+            gateway.close()
     summary = {k: (v["score"] | {"tokens": v["tokens"]} if isinstance(v, dict) else f"{type(v).__name__}: {v}")
                for k, v in results.items()}
     (Path(a.out) / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
@@ -53,20 +116,14 @@ def pilot(a) -> int:
     return 0
 
 
-def _player_runner(spec: str, a, user: str):
+def _player_runner(spec: str, a, user: str | None, name: str, gateway):
+    """Grayson reaches a player only through the game's broker (FA_GRAYSON_URL/TOKEN, set by the game): its API key
+    stays with the grader."""
     kind, model = spec.split(":", 1)
     if kind == "baseline":
         return RUNNERS[kind](model)
-    # Grayson reaches players only through the game's broker (FA_GRAYSON_URL/TOKEN, set by the game): the API key
-    # stays with the grader.
-    env = {}
-    if kind == "claude-code" and os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
-    if kind == "codex":
-        # One Unix user and one login for every Codex player (sandbox/setup-box.sh).
-        user = "arena-codex"
-        env["CODEX_HOME"] = "/home/arena-codex/.codex"
-    return RUNNERS[kind](model, extra_env=env, as_user=user, proxy=a.proxy, timeout_s=a.session_timeout)
+    env, user, proxy = _credentials(a, kind, name, user, gateway)
+    return RUNNERS[kind](model, extra_env=env, as_user=user, proxy=proxy, timeout_s=a.session_timeout)
 
 
 def _text_generator_spec(a) -> str | None:
@@ -81,19 +138,17 @@ def _text_generator_spec(a) -> str | None:
     return None if a.text_generator == "none" else a.text_generator
 
 
-def _textgen(cfg, a, log):
-    """The text generator runs grader side, as the harness user (Codex as its shared login), through the proxy."""
+def _textgen(cfg, a, log, gateway):
+    """The text generator runs grader side, as the harness user (Codex on a subscription as its shared login)."""
     from .textgen import TextGen, make_generator
 
     if not cfg.text_generator:
         return None
     kind = cfg.text_generator.split(":", 1)[0]
-    env, user = {}, None
-    if kind == "claude-code" and os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
-    if kind == "codex":
-        user, env["CODEX_HOME"] = "arena-codex", "/home/arena-codex/.codex"
-    gen = make_generator(cfg.text_generator, as_user=user, proxy=a.proxy, extra_env=env,
+    env, user, proxy = _credentials(a, kind, "textgen", None, gateway)
+    if a.credentials == "subscription" and kind == "codex" and a.player_users:
+        user, env["CODEX_HOME"] = CODEX_USER, CODEX_HOME
+    gen = make_generator(cfg.text_generator, as_user=user, proxy=proxy, extra_env=env,
                          workdir=Path(a.out) / "textgen-work")
     return TextGen(gen, cfg.text_cache, seed=cfg.seed, world=cfg.world, workers=a.text_workers, log=log,
                    match=str(Path(a.out).resolve()))
@@ -113,30 +168,38 @@ def game(a) -> int:
                      text_generator=_text_generator_spec(a), attacker_text=a.attacker_text == "on",
                      text_cache=Path(a.text_cache).expanduser(), replay=a.replay == "on" or a.watch)
     engine = RunmereEngine(Path(a.sandbox))
-    users = iter(f"arena-p{n}" for n in range(1, 13))
+    if (a.credentials == "subscription" and a.player_users and a.defenders.startswith("codex:")
+            and (a.attackers or "").startswith("codex:")):
+        raise SystemExit("with --credentials subscription, Codex players share one user and its folders, so Codex "
+                         "can't play both sides: an attacker's view is truth. Use --credentials api-key.")
+    gateway = _gateway(a, [a.defenders, a.attackers, cfg.text_generator])
+    users = iter(_users(a))
     insts = a.institution or list(INSTITUTIONS)
-    players = [Player(f"defender-{i}", "defender", i, _player_runner(a.defenders, a, next(users))) for i in insts]
+    players = [Player(f"defender-{i}", "defender", i, _player_runner(a.defenders, a, next(users), f"defender-{i}",
+                                                                      gateway)) for i in insts]
     rest = list(users)
     attackers = Attackers(Path(a.world), engine.day_iso(cfg.for_institution(insts[0]), 0))
     log = lambda rec: print(json.dumps(rec, default=str), flush=True)
     g = Game(cfg, engine, players, Path(a.out), Path(a.sandbox), attacker_api=attackers,
-             attacker_runners=(lambda i, ring: _player_runner(a.attackers, a, rest[i])) if a.attackers else None,
-             max_attackers=min(a.max_attackers, len(rest)), log=log, textgen=_textgen(cfg, a, log))
+             attacker_runners=(lambda i, ring: _player_runner(a.attackers, a, rest[i], f"attacker-R{ring}", gateway))
+             if a.attackers else None,
+             max_attackers=min(a.max_attackers, len(rest)), log=log, textgen=_textgen(cfg, a, log, gateway))
     watch = _watch(Path(a.out)) if a.watch else None
     try:
         result = g.run()
     finally:
         if watch is not None:
             watch.close()
+        if gateway is not None:
+            gateway.close()
     print(json.dumps({"defenders": result["defenders"], "attackers": result["attackers"],
                       "tokens": result["tokens"]}, indent=2, default=str))
     return 0
 
 
 def main(argv=None) -> int:
-    # The agent user shares the workspace through the `arena` group; what the harness writes there must stay
-    # writable for it.
-    os.umask(0o002)
+    # A player shares its own folder with the harness through its own group, and nobody else may read it.
+    os.umask(0o007)
     ap = argparse.ArgumentParser(prog="fraud-arena")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("pilot")
@@ -153,8 +216,13 @@ def main(argv=None) -> int:
     p.add_argument("--horizon-days", type=int, default=120)
     p.add_argument("--grayson-budget", type=int, default=200)
     p.add_argument("--parallel", type=int, default=2)
-    p.add_argument("--agent-user")
-    p.add_argument("--proxy")
+    p.add_argument("--player-users", action=argparse.BooleanOptionalAction, default=True,
+                   help="run each defender as its own Unix user (arena-pN); --no-player-users for a local run")
+    p.add_argument("--credentials", choices=["subscription", "api-key"], default="subscription",
+                   help="subscription: CLAUDE_CODE_OAUTH_TOKEN and the Codex login, through --proxy; api-key: the "
+                        "harness's model gateway holds ANTHROPIC_API_KEY / OPENAI_API_KEY and no player sees a key")
+    p.add_argument("--proxy", default="http://127.0.0.1:3128", help="the allowlisting proxy (subscriptions)")
+    p.add_argument("--model-budget-tokens", type=int, help="api-key: the run's approved model budget, all players")
     p.add_argument("--session-timeout", type=int, default=2 * 3600)
     q = sub.add_parser("game", help="defenders at the institutions vs attackers running rings, one world")
     q.add_argument("--world", required=True)
@@ -184,8 +252,13 @@ def main(argv=None) -> int:
     q.add_argument("--attacker-text", choices=["on", "off"], default="off",
                    help="attackers brief their schemes' texts; every text is generated with the attackers' model")
     q.add_argument("--settle-days", type=int, default=30, help="frozen run-on after the last period, before scoring")
-    q.add_argument("--proxy")
-    q.add_argument("--codex-home", default="/srv/codex-home")
+    q.add_argument("--player-users", action=argparse.BooleanOptionalAction, default=True,
+                   help="run each player as its own Unix user (arena-pN); --no-player-users for a local run")
+    q.add_argument("--credentials", choices=["subscription", "api-key"], default="subscription",
+                   help="subscription: CLAUDE_CODE_OAUTH_TOKEN and the Codex login, through --proxy; api-key: the "
+                        "harness's model gateway holds ANTHROPIC_API_KEY / OPENAI_API_KEY and no player sees a key")
+    q.add_argument("--proxy", default="http://127.0.0.1:3128", help="the allowlisting proxy (subscriptions)")
+    q.add_argument("--model-budget-tokens", type=int, help="api-key: the run's approved model budget, all players")
     q.add_argument("--session-timeout", type=int, default=2 * 3600)
     q.add_argument("--replay", choices=["on", "off"], default="on", help="write <out>/replay/ as the match runs")
     q.add_argument("--watch", action="store_true",

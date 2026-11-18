@@ -31,6 +31,8 @@ import sys
 import time
 from pathlib import Path
 
+from . import sandbox
+
 MAX_CASES_PER_CALL = 20000
 
 
@@ -47,9 +49,9 @@ class Workflow:
             if snapshot.exists():
                 shutil.rmtree(snapshot)
             shutil.copytree(bundle_dir, snapshot, ignore=shutil.ignore_patterns("reviews.json", "__pycache__"))
-            os.chmod(snapshot, 0o755)
+            os.chmod(snapshot, 0o2750)
             for p in snapshot.rglob("*"):
-                os.chmod(p, 0o755 if p.is_dir() else 0o644)
+                os.chmod(p, 0o2750 if p.is_dir() else 0o640)
         self.snapshot = snapshot
         log = workspace / ".arena" / "workflow.log"
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -57,7 +59,8 @@ class Workflow:
         argv = [python, "-m", "fraud_arena.workflow", str(snapshot / "workflow.py")]
         base = {k: v for k, v in os.environ.items() if k in ("PATH", "LANG", "PYTHONPATH")} | env
         if as_user:
-            argv = ["sudo", "-n", "-u", as_user, "-H", "env", "-i", *[f"{k}={v}" for k, v in base.items()], *argv]
+            argv = sandbox.as_user(as_user, base, argv, workspace / ".arena" / "workflow-env.json")
+            base = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         self.proc = subprocess.Popen(argv, cwd=workspace, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self._log, text=True, bufsize=1, env=base)
         ready = self._read(start_timeout_s)

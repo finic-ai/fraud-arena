@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import sandbox
+
 
 @dataclass(frozen=True)
 class McpServer:
@@ -69,8 +71,8 @@ class AgentRunner:
         self.model = model
         self.timeout_s = timeout_s
         self.extra_env = dict(extra_env or {})
-        # The agent runs as its own Unix user (it can read only its workspace and its tables) and reaches the
-        # network only through an allowlisting proxy; see sandbox/setup-box.sh.
+        # The agent runs as its own Unix user, which can read only its own folder and reach only loopback: the model
+        # gateway or the allowlisting proxy, its tool server and the Grayson broker (sandbox/setup-box.sh).
         self.as_user = as_user
         self.proxy = proxy
 
@@ -82,21 +84,26 @@ class AgentRunner:
 
     def env(self) -> dict[str, str]:
         keep = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG", "TMPDIR", "USER", "SHELL")}
+        keep |= {"NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"}
         if self.proxy:
             keep |= {"HTTPS_PROXY": self.proxy, "HTTP_PROXY": self.proxy, "https_proxy": self.proxy,
-                     "http_proxy": self.proxy, "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"}
+                     "http_proxy": self.proxy}
         return keep | self.extra_env
 
     def run(self, workspace: Path, prompt: str, servers: list[McpServer], log: Path) -> SessionResult:
         workspace.mkdir(parents=True, exist_ok=True)
         argv, stdin = self.command(workspace, servers, prompt)
         env = self.env()
+        env_file = workspace / ".arena" / "session-env.json"
         if self.as_user:
-            argv = ["sudo", "-n", "-u", self.as_user, "-H", "env", "-i",
-                    *[f"{k}={v}" for k, v in env.items() if k not in ("HOME", "USER")], *argv]
+            argv = sandbox.as_user(self.as_user, env, argv, env_file)
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         start = time.monotonic()
-        proc = subprocess.run(argv, cwd=workspace, input=stdin, capture_output=True, text=True, env=env,
-                              timeout=self.timeout_s)
+        try:
+            proc = subprocess.run(argv, cwd=workspace, input=stdin, capture_output=True, text=True, env=env,
+                                  timeout=self.timeout_s)
+        finally:
+            env_file.unlink(missing_ok=True)
         seconds = time.monotonic() - start
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(proc.stdout + ("\n--- stderr ---\n" + proc.stderr if proc.stderr else ""))
@@ -111,7 +118,8 @@ class AgentRunner:
 
 
 class ClaudeCodeRunner(AgentRunner):
-    """`claude -p` with a subscription token (`CLAUDE_CODE_OAUTH_TOKEN` in `extra_env`)."""
+    """`claude -p`, on a subscription token (`CLAUDE_CODE_OAUTH_TOKEN` in `extra_env`) or through the model gateway
+    (`ANTHROPIC_BASE_URL` and a gateway token)."""
 
     name = "claude-code"
 
@@ -142,13 +150,19 @@ class ClaudeCodeRunner(AgentRunner):
 
 
 class CodexRunner(AgentRunner):
-    """`codex exec --json`, signed in with a ChatGPT subscription (its `CODEX_HOME` holds the login)."""
+    """`codex exec --json`, signed in with a ChatGPT subscription (its `CODEX_HOME` holds the login) or through the
+    model gateway (`FA_GATEWAY_OPENAI_URL`, `FA_GATEWAY_KEY`)."""
 
     name = "codex"
 
     def command(self, workspace, servers, prompt):
         argv = ["codex", "exec", "--json", "-m", self.model, "-C", str(workspace), "--skip-git-repo-check",
                 "--dangerously-bypass-approvals-and-sandbox", "--ignore-user-config", "--ephemeral"]
+        if self.extra_env.get("FA_GATEWAY_OPENAI_URL"):
+            argv += ["-c", 'model_provider="arena"', "-c", 'model_providers.arena.name="arena"',
+                     "-c", f'model_providers.arena.base_url="{self.extra_env["FA_GATEWAY_OPENAI_URL"]}"',
+                     "-c", 'model_providers.arena.env_key="FA_GATEWAY_KEY"',
+                     "-c", 'model_providers.arena.wire_api="responses"']
         for s in servers:
             key = f"mcp_servers.{s.name}"
             if s.url:

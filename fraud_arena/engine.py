@@ -21,12 +21,11 @@ from .runners import McpServer
 
 
 class RunmereEngine:
-    def __init__(self, sandbox_root: Path, *, agent_user: str | None = None, python: str = sys.executable):
+    def __init__(self, sandbox_root: Path, *, python: str = sys.executable):
         import runmere
 
         self.rm = runmere
         self.sandbox_root = Path(sandbox_root)
-        self.agent_user = agent_user
         self.python = python
         self._worlds = {}
         self._specs = {}
@@ -98,13 +97,15 @@ class RunmereEngine:
         epoch = datetime.fromisoformat(self.spec(cfg)["clock"]["epoch"].replace("Z", "+00:00"))
         return (epoch + timedelta(days=day)).astimezone(timezone.utc).isoformat()
 
-    def _agent_dir(self, cfg, name: str) -> Path:
-        d = self.sandbox_root / f"{cfg.institution}-s{cfg.seed}" / name
+    def _agent_dir(self, cfg, name: str, tag: str | None = None) -> Path:
+        """A game's player (`tag`) gets its tables in its own private folder, never in one shared by institution."""
+        base = self.sandbox_root / tag / "tables" if tag else self.sandbox_root
+        d = base / f"{cfg.institution}-s{cfg.seed}" / name
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def _tables_dir(self, run, cfg, tag: str | None) -> Path:
-        return self._agent_dir(cfg, f"{tag + '-' if tag else ''}data-day{int(run.day)}")
+        return self._agent_dir(cfg, f"data-day{int(run.day)}", tag)
 
     PUBLIC_OBSERVER = "public"
 
@@ -177,7 +178,7 @@ class RunmereEngine:
         if rewrite is not None:
             rewrite(tmp)
         for p in [tmp, *tmp.rglob("*")]:
-            os.chmod(p, 0o755 if p.is_dir() else 0o644)
+            os.chmod(p, 0o2750 if p.is_dir() else 0o640)
         old = dest.with_name(dest.name + ".old")
         shutil.rmtree(old, ignore_errors=True)
         if dest.exists():
@@ -188,7 +189,7 @@ class RunmereEngine:
     @contextmanager
     def tool_server(self, run, cfg, *, workspace: Path | None = None, tag: str | None = None):
         data = self.write_tables(run, cfg, tag)
-        meta = self._agent_dir(cfg, f"{tag + '-' if tag else ''}meta")
+        meta = self._agent_dir(cfg, "meta", tag)
         (meta / "decisions.json").write_text(json.dumps(self.decision_points(cfg), indent=2, default=str))
         fmt = meta / "deploy-format.md"
         fmt.write_text(resources.files("fraud_arena").joinpath("briefs/deploy-format.md").read_text())

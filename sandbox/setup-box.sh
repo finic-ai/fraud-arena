@@ -1,29 +1,23 @@
 #!/bin/bash
-# Turns an EC2 work box into a pilot sandbox host. The harness runs as `ubuntu`; each agent session runs as the
-# `agent` user, which can read only its episode workspace and its institution's tables, and reaches the network only
-# through a local proxy that allows the model providers and Grayson. Run as root. Idempotent.
+# Turns an EC2 work box into a pilot sandbox host. The harness runs as `ubuntu`; each player's sessions run as that
+# player's own user, which can read only its own folder and reach only loopback. Run as root, then start a new login
+# session for `ubuntu` so the harness has its new groups. Idempotent.
 set -euo pipefail
-R=us-west-2
-
-id agent >/dev/null 2>&1 || useradd --create-home --shell /bin/bash agent
+# /srv/arena holds a private folder per player (fraud_arena/sandbox.py): its workspace, its tables and its deployed
+# bundles, readable only by that player's user and the harness. Players can't list /srv/arena. Episode state
+# (checkpoints, scoring exports, the gateway's usage log) stays under /home/ubuntu, which no player can read.
 chmod 750 /home/ubuntu
-install -d -o agent -g agent -m 700 /home/agent/.codex /home/agent/.claude
-# /srv/arena: workspaces and the tables served to agents; shared by the harness (ubuntu) and `agent`. Episode state
-# (checkpoints, scoring exports) stays under /home/ubuntu, which `agent` can't read.
-getent group arena >/dev/null || groupadd arena
-usermod -aG arena agent && usermod -aG arena ubuntu
-install -d -o ubuntu -g arena -m 2770 /srv/arena
-grep -q 'umask 002' /home/agent/.profile 2>/dev/null || echo 'umask 002' >> /home/agent/.profile
+# A folder left by the shared-group pilot is readable by its group: keep it, but out of every player's reach.
+if [ -d /srv/arena ] && [ "$(stat -c %a /srv/arena)" != 711 ]; then
+  mv /srv/arena "/srv/arena.shared-$(date +%Y%m%d%H%M%S)" && chmod 700 /srv/arena.shared-*
+fi
+install -d -o ubuntu -g ubuntu -m 711 /srv/arena
 
-# Agent CLIs, system-wide so `agent` can run them.
-command -v codex >/dev/null || npm install -g --silent @openai/codex
-aws secretsmanager get-secret-value --region $R --secret-id fraud-arena/codex-auth --query SecretString \
-  --output text > /home/agent/.codex/auth.json
-chown agent:agent /home/agent/.codex/auth.json && chmod 600 /home/agent/.codex/auth.json
-
-# The proxy: CONNECT only, and only to these hosts.
+# Players reach the network only on loopback. With `--credentials api-key` their one route to a model is the
+# harness's gateway, which holds the keys. With subscriptions they reach the providers through this proxy: CONNECT
+# only, and only to these hosts.
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tinyproxy >/dev/null
-cat > /etc/tinyproxy/allow <<'EOF'
+cat > /etc/tinyproxy/allow <<'EOF2'
 ^api\.anthropic\.com$
 ^(console|claude|platform)\.anthropic\.com$
 ^statsig\.anthropic\.com$
@@ -31,8 +25,8 @@ cat > /etc/tinyproxy/allow <<'EOF'
 ^api\.openai\.com$
 ^chatgpt\.com$
 ^(auth|ab)\.openai\.com$
-EOF
-cat > /etc/tinyproxy/tinyproxy.conf <<'EOF'
+EOF2
+cat > /etc/tinyproxy/tinyproxy.conf <<'EOF2'
 User tinyproxy
 Group tinyproxy
 Port 3128
@@ -45,24 +39,21 @@ FilterType ere
 FilterDefaultDeny Yes
 FilterURLs Off
 ConnectPort 443
-EOF
-systemctl restart tinyproxy
+EOF2
+systemctl enable --now tinyproxy >/dev/null 2>&1 && systemctl restart tinyproxy
 
-# `agent` may talk to loopback (the proxy, its own MCP tool server) and nothing else.
-U=$(id -u agent)
-iptables -C OUTPUT -m owner --uid-owner "$U" -o lo -j ACCEPT 2>/dev/null || iptables -A OUTPUT -m owner --uid-owner "$U" -o lo -j ACCEPT
-iptables -C OUTPUT -m owner --uid-owner "$U" -j REJECT 2>/dev/null || iptables -A OUTPUT -m owner --uid-owner "$U" -j REJECT
-ip6tables -C OUTPUT -m owner --uid-owner "$U" -o lo -j ACCEPT 2>/dev/null || ip6tables -A OUTPUT -m owner --uid-owner "$U" -o lo -j ACCEPT
-ip6tables -C OUTPUT -m owner --uid-owner "$U" -j REJECT 2>/dev/null || ip6tables -A OUTPUT -m owner --uid-owner "$U" -j REJECT
-
-# One user per Claude Code player (arena-p1..arena-p12), each with its own home and workspace. All Codex players run
-# as one user, arena-codex, with one ChatGPT login: copies of a login invalidate each other when one refreshes, and a
-# login home can't be shared across users (Codex writes its files private). Codex players of a game are then one
-# team that can see each other's workspaces (fine within a side; self-play needs a second login).
+# One user per player (arena-p1..arena-p12). Each user's own group holds only it and the harness user, so no player
+# can read another player's folder: an attacker's workspace holds its ring's view, which is truth. With subscriptions,
+# every Codex session runs as arena-codex with its one ChatGPT login (copies of a login invalidate each other when one
+# refreshes), so Codex players share that user, and the harness refuses Codex on both sides of a game.
+userdel -r agent >/dev/null 2>&1 || true
+getent group arena >/dev/null && groupdel arena
 for u in $(seq -f 'arena-p%g' 1 12) arena-codex; do
-  id $u >/dev/null 2>&1 || useradd --create-home --shell /bin/bash $(getent group $u >/dev/null && echo -g $u) $u
-  usermod -aG arena $u
-  grep -q 'umask 002' /home/$u/.profile 2>/dev/null || echo 'umask 002' >> /home/$u/.profile
+  id $u >/dev/null 2>&1 || useradd --create-home --shell /bin/bash --user-group $u
+  [ "$(id -gn $u)" = "$u" ] || { getent group $u >/dev/null || groupadd $u; usermod -g $u $u; }
+  chmod 700 /home/$u
+  sed -i '/umask 002/d' /home/$u/.profile 2>/dev/null || true
+  usermod -aG $u ubuntu
   uid=$(id -u $u)
   for t in iptables ip6tables; do
     $t -C OUTPUT -m owner --uid-owner $uid -o lo -j ACCEPT 2>/dev/null || $t -A OUTPUT -m owner --uid-owner $uid -o lo -j ACCEPT
@@ -70,12 +61,19 @@ for u in $(seq -f 'arena-p%g' 1 12) arena-codex; do
   done
 done
 install -d -o arena-codex -g arena-codex -m 700 /home/arena-codex/.codex
-aws secretsmanager get-secret-value --region $R --secret-id fraud-arena/codex-auth --query SecretString \
+aws secretsmanager get-secret-value --region us-west-2 --secret-id fraud-arena/codex-auth --query SecretString \
   --output text > /home/arena-codex/.codex/auth.json
 chown arena-codex:arena-codex /home/arena-codex/.codex/auth.json && chmod 600 /home/arena-codex/.codex/auth.json
 
-# The harness user may start sessions as the players without a password, and nothing else.
-{ echo "Runas_Alias ARENA = agent, arena-codex, $(seq -s, -f 'arena-p%g' 1 12)"; echo "ubuntu ALL=(ARENA) NOPASSWD: /usr/bin/env"; } > /etc/sudoers.d/fraud-arena
+# Agent CLIs, system-wide so the players can run them.
+command -v claude >/dev/null || npm install -g --silent @anthropic-ai/claude-code
+command -v codex >/dev/null || npm install -g --silent @openai/codex
+
+# The harness starts a player's session through arena-exec, which reads the session's environment from a file in
+# the player's folder, so no secret is ever on a command line. The harness user may run that, as a player, and
+# nothing else.
+install -o root -g root -m 755 "$(dirname "$0")/arena-exec" /usr/local/bin/arena-exec
+{ echo "Runas_Alias ARENA = arena-codex, $(seq -s, -f 'arena-p%g' 1 12)"; echo "ubuntu ALL=(ARENA) NOPASSWD: /usr/local/bin/arena-exec"; } > /etc/sudoers.d/fraud-arena
 chmod 440 /etc/sudoers.d/fraud-arena && visudo -cf /etc/sudoers.d/fraud-arena >/dev/null
 
-echo "sandbox ready: agent uid $U, proxy http://127.0.0.1:3128"
+echo "sandbox ready: players arena-p1..arena-p12 and arena-codex, proxy http://127.0.0.1:3128"

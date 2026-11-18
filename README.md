@@ -34,3 +34,26 @@ The viewer (`viewer/`, TypeScript and PixiJS) builds into `fraud_arena/web/viewe
 
 `viewer/sample/replay.jsonl` is a synthetic replay (a toy economy, `python -m fraud_arena.demo <out>`) for demos.
 Open `viewer/index.html` over HTTP to play it; `#day=60&focus=R2&ghost=1&paused=1&turns=35` deep-links a view.
+
+## The sandbox
+
+Each player (each defender and each attacker) runs as its own Unix user, `arena-p1` to `arena-p12`
+(`sandbox/setup-box.sh`). Its folder under `--sandbox` holds its workspace, its tables and its deployed bundles, and
+only that user and the harness can read it, so no defender can read an attacker's `view.json`, which is truth.
+Players reach only loopback.
+
+Model access is a choice per run, `--credentials`:
+
+- `subscription` (the default): Claude Code players run on `CLAUDE_CODE_OAUTH_TOKEN`, and every Codex player runs as
+  `arena-codex` with its one ChatGPT login, so Codex players share that user and its folders (the harness refuses
+  Codex on both sides of a game). Players reach the providers through the allowlisting proxy (`--proxy`). A player's
+  own token is in its session's environment, so code it runs can read it.
+- `api-key`: no model credential is in a player's sandbox. The harness runs a model gateway
+  (`fraud_arena/gateway.py`) that holds `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`; each player gets only the gateway's
+  address and its own gateway token. The gateway accepts only the run's models, logs every call's tokens to
+  `<out>/gateway/usage.jsonl`, and stops the run at `--model-budget-tokens`, the budget the owner approved.
+
+Either way, Grayson's key stays in the harness's broker, and sessions get their environment from a file in the
+player's folder (`sandbox/arena-exec`), never on a command line, where `ps` shows it to every user.
+`sandbox/check-box.sh` checks all of this from the players' side. For a local run without player users, pass
+`--no-player-users`.

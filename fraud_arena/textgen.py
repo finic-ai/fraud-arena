@@ -294,7 +294,7 @@ class GenerationError(Exception):
 
 
 class _ClaudeText(ClaudeCodeRunner):
-    """`claude -p` with no tools, no MCP and a short system prompt: a plain completion on the subscription."""
+    """`claude -p` with no tools, no MCP and a short system prompt: a plain completion on the run's credentials."""
 
     def command(self, workspace, servers, prompt):
         return (["claude", "-p", "--model", self.model, "--output-format", "json", "--tools", "",
@@ -310,7 +310,7 @@ class _CodexText(CodexRunner):
 
 
 class CliGenerator:
-    """A generator on a subscription CLI. `generate(prompt)` returns (text, usage); raises `UsageLimited` or
+    """A generator on an agent CLI. `generate(prompt)` returns (text, usage); raises `UsageLimited` or
     `GenerationError`."""
 
     def __init__(self, spec: str, *, as_user=None, proxy=None, extra_env=None, workdir: Path | None = None,

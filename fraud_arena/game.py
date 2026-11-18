@@ -33,6 +33,7 @@ from .config import INSTITUTIONS, EpisodeConfig, ScoreWeights
 from .episode import brief_text, EpisodeState
 from .runners import AgentRunner, UsageLimited
 from .scoring import paired, ring_score, window_score
+from .sandbox import private_dir
 
 
 @dataclass
@@ -154,6 +155,9 @@ class Game:
         self.grayson_asked: dict[str, int] = {}
 
     def workspace(self, p: Player) -> Path:
+        """The player's folder holds its workspace, its tables and its deployed bundles; only it and the harness can
+        read it. An attacker's workspace holds its ring's view, which is truth."""
+        private_dir(self.sandbox / p.name, getattr(p.runner, "as_user", None))
         ws = self.sandbox / p.name / "workspace"
         ws.mkdir(parents=True, exist_ok=True)
         return ws
