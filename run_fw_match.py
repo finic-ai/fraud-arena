@@ -51,9 +51,9 @@ and merchants. Each week you set the syndicate's plan (`arena policy help`): how
 favours, where it attacks, timing, devices, proxy exits, identities and mule recruiting.
 
 Another AI defends Brindlemark Bank and adapts its rules each week. Scoring, per week, against a reference run of the
-same world where the rings follow their normal habits: what the syndicate takes from the observed institutions
-(Brindlemark, the Dovrex exchange and merchants Hopcrate and Kellmont; mule pass-through counts at 10%), minus what the
-rings would have taken anyway.
+same world where the rings follow their normal habits: what the syndicate takes from BRINDLEMARK (mule pass-through
+counts at 10%), minus what the rings would have taken there anyway. Money taken elsewhere doesn't score. The syndicate
+works within an effort budget (see `arena policy help`): pushing some rings or schemes harder means easing off others.
 
 Your data: your own results only (`arena results`): what each ring took from each institution each week, and how many
 of each scheme you have run. You never see the bank's rules, alerts or data.
@@ -167,7 +167,13 @@ def main():
             deploy_error = m.deploy(json.loads((works["defender"] / "policy.json").read_text()))
         plan_problems = []
         if players["attacker"].startswith("claude:"):
-            plan_problems = m.set_plan(json.loads((works["attacker"] / "policy.json").read_text()))
+            from arena.fw.cli import budget_problems
+            plan = json.loads((works["attacker"] / "policy.json").read_text())
+            plan_problems = budget_problems(plan, m.menu)
+            if plan_problems:  # written around the checker: keep last week's plan
+                plan = weeks[-1]["policies"]["attacker"] if weeks else {}
+                (works["attacker"] / "policy.json").write_text(json.dumps(plan, indent=1))
+            plan_problems += m.set_plan(plan)
         res, truth, _ = m.play_week()
         scores["defender"].append(res["defender"]["score"])
         scores["attacker"].append(res["attacker"]["score"])

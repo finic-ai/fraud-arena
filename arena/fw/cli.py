@@ -111,7 +111,43 @@ def policy_help(work, role):
         lines.append(f"- {attr}: {rng}")
     lines.append("plan_volume multiplies every scheme of a ring; plan_tactic_<scheme> multiplies one scheme (1 = as scripted);"
                  " plan_quiet stops the ring; plan_where 'planned' + plan_share_<institution> picks where it attacks.")
+    lines.append(f"BUDGET: the syndicate has limited people, money and mules. plan_volume summed over the 10 rings must be at "
+                 f"most {VOLUME_BUDGET:g} (each unset ring counts 1, so scripted is 10), and the 22 scheme multipliers must "
+                 f"sum to at most {TACTIC_BUDGET:g} (each scheme counts its highest multiplier across rings; scripted is 22). "
+                 f"To push some rings or schemes harder, turn others down.")
     return "\n".join(lines)
+
+
+VOLUME_BUDGET = 12.0  # sum of plan_volume over the 10 rings (scripted: 10 x 1)
+TACTIC_BUDGET = 26.0  # sum over the 22 schemes of each scheme's multiplier (scripted: 22 x 1)
+
+
+def plan_effort(plan, menu):
+    """The plan's effort: (total volume across rings, total scheme multipliers). Unset values count as 1."""
+    plan = plan or {}
+    tactics = [a for a in menu if a.startswith("plan_tactic_")]
+    volume, tactic_max = 0.0, {t: 0.0 for t in tactics}
+    for ring in range(1, 11):
+        merged = dict(plan.get("all") or {})
+        merged.update((plan.get("rings") or {}).get(str(ring)) or {})
+        v = merged.get("plan_volume")
+        volume += 1.0 if v is None else float(v)
+        for t in tactics:
+            x = merged.get(t)
+            tactic_max[t] = max(tactic_max[t], 1.0 if x is None else float(x))
+    return volume, sum(tactic_max.values())
+
+
+def budget_problems(plan, menu):
+    volume, tactics = plan_effort(plan, menu)
+    out = []
+    if volume > VOLUME_BUDGET + 1e-9:
+        out.append(f"over the volume budget: plan_volume summed over the 10 rings is {volume:.2f}, at most {VOLUME_BUDGET:g} "
+                   f"(unset rings count 1)")
+    if tactics > TACTIC_BUDGET + 1e-9:
+        out.append(f"over the scheme budget: the 22 scheme multipliers sum to {tactics:.2f}, at most {TACTIC_BUDGET:g} "
+                   f"(each scheme counts its highest multiplier across rings; unset counts 1)")
+    return out
 
 
 def check(work, role, policy):
@@ -158,7 +194,7 @@ def check(work, role, policy):
                 problems.append(f"{where}.{attr}: must be a number from {d['min']} to {d['max']}")
             elif "values" in d and value not in d["values"]:
                 problems.append(f"{where}.{attr}: must be one of {d['values']}")
-    return problems
+    return problems + budget_problems(policy, menu)
 
 
 if __name__ == "__main__":

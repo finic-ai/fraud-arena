@@ -157,8 +157,14 @@ class Match:
                                    end=end, weights=WEIGHTS)
             r = scoring.ring_score(ref_truth, owners, ring=ring, number=number, institutions=observed, start=start,
                                    end=end, weights=WEIGHTS)
-            att["candidate"] += c["score"]
-            att["reference"] += r["score"]
+            # Ranked: what the syndicate takes from the defended bank only (losses + mule flow at its weight).
+            def at_bank(x):
+                b = x["by_institution"].get(INSTITUTION, {"losses": 0.0, "mule_flow": 0.0})
+                return b["losses"] + WEIGHTS.mule_flow * b["mule_flow"]
+            att["candidate"] += at_bank(c)
+            att["reference"] += at_bank(r)
+            att["all_institutions_candidate"] = att.get("all_institutions_candidate", 0.0) + c["score"]
+            att["all_institutions_reference"] = att.get("all_institutions_reference", 0.0) + r["score"]
             att["by_ring"][number] = {"candidate": c, "reference": r}
         result = {
             "week": self.week, "start": start, "end": end,
@@ -166,7 +172,8 @@ class Match:
                          "added_friction": defender.added_friction, "candidate": d_c.as_dict(),
                          "reference": d_r.as_dict()},
             "attacker": {"score": att["candidate"] - att["reference"], "candidate": att["candidate"],
-                         "reference": att["reference"], "by_ring": att["by_ring"]},
+                         "reference": att["reference"], "by_ring": att["by_ring"],
+                         "all_institutions_score": att["all_institutions_candidate"] - att["all_institutions_reference"]},
         }
         return result, cand_truth, owners
 
