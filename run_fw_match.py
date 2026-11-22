@@ -1,7 +1,8 @@
 """Play one Fraud Arena 1v1 match on Fraud World.
 
     python run_fw_match.py --defender claude:sonnet --attacker claude:opus --weeks 4 --out runs/NAME
-    (a player is claude:<model> for a Claude Code session, or builtin for the bank's rules / the rings' scripts)
+    (a player is openrouter:<model id> for the benchmark harness: mini-SWE-agent over OpenRouter, any model;
+    claude:<model> for a Claude Code session, for smoke tests; or builtin for the bank's rules / the rings' scripts)
 
 Each Claude Code player runs on this machine with your Claude Code login, restricted to one tool: its own `arena`
 command (Bash(arena:*)), with no MCP servers, no user settings or hooks, and no session saved.
@@ -17,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from arena.fw.match import Match
+from arena.player import is_player, play_turn
 
 REPO = Path(__file__).resolve().parent
 
@@ -73,28 +75,27 @@ of each scheme you have run. You never see the bank's rules, alerts or data.
 TASK = """{brief}
 ## This turn
 It is your turn before week {week} of {weeks}. You have about {max_turns} commands. Start with `arena status`, then
-`arena policy help`. Study your data, then write your policy as JSON with the Write tool to a NEW file drafts/week{week}.json
+`arena policy help`. Study your data, then write your policy as JSON {write} to a NEW file drafts/week{week}.json
 (only files under drafts/ can be written) and run `arena policy set drafts/week{week}.json`; fix and retry if it
 reports problems. `arena policy show` prints the policy now in force, to start from.
 Keep short notes for next week with `arena note "..."`. Only `arena` commands work here.
-When your policy is saved, stop and reply with one line summarizing what you changed and why."""
+{finish}"""
 
-GRAYSON_NOTE = """
-## Grayson (enabled in this match)
-Grayson is a model that reads a case the way an analyst would, including its free text (payment memos, notes, payee
-names, application fields), and answers a multiple-choice question about it with probabilities. It needs no labels,
-so it helps most where your fraud_known labels are thin. Much of the ring's scam traffic shows up only in text that
-numeric rules can't read. Try it on past cases with `arena grayson` (e.g. ask whether a payment memo looks like a scam
-payment, then compare the answers with fraud_known), then add a `grayson` section to your policy so it answers live on
-the decisions you choose; your rules then read `outside.<question>.<option>` (see `arena policy help`).
-"""
+# Only the mechanics of writing a file and ending the turn differ between the two harnesses.
+WRITE = {"claude": "with the Write tool", "msa": "with a heredoc"}
+FINISH = {"claude": "When your policy is saved, stop and reply with one line summarizing what you changed and why.",
+          "msa": "When your policy is saved, end your turn."}
 
 
-def write_wrapper(bin_dir, work, key_file=None):
+def is_ai(who):
+    return who.startswith("claude:") or is_player(who)
+
+
+
+def write_wrapper(bin_dir, work):
     bin_dir.mkdir(parents=True, exist_ok=True)
     w = bin_dir / "arena"
-    key = f'GRAYSON_API_KEY="$(cat "{key_file}")" ' if key_file else ""
-    w.write_text(f'#!/bin/sh\n{key}PYTHONPATH="{REPO}" exec "{sys.executable}" -m arena.fw.cli "{work}" "$@"\n')
+    w.write_text(f'#!/bin/sh\nPYTHONPATH="{REPO}" exec "{sys.executable}" -m arena.fw.cli "{work}" "$@"\n')
     w.chmod(0o700)
 
 
@@ -105,7 +106,7 @@ def claude_turn(model, work, bin_dir, prompt, log_path, max_turns):
            "--allowedTools", "Bash(arena:*)", "Edit(drafts/**)", "Read(drafts/**)",
            "--strict-mcp-config", "--mcp-config", str(empty_mcp), "--setting-sources", "project",
            "--no-session-persistence", "--max-turns", str(max_turns), "--output-format", "json"]
-    env = {k: v for k, v in os.environ.items() if k != "GRAYSON_API_KEY"}
+    env = {k: v for k, v in os.environ.items() if k not in ("OPENROUTER_API_KEY",)}
     env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
     started = time.time()
     try:
@@ -130,31 +131,19 @@ def main():
     ap.add_argument("--warmup", type=int, default=30)
     ap.add_argument("--intensity", type=float, default=3.0, help="ring volume during the match, x their usual")
     ap.add_argument("--max-turns", type=int, default=25)
-    ap.add_argument("--grayson", action="store_true", help="give the defender Grayson (needs GRAYSON_API_KEY)")
-    ap.add_argument("--grayson-budget", type=int, default=200, help="Grayson calls per week")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
-    if args.grayson and not os.environ.get("GRAYSON_API_KEY"):
-        env_file = Path.home() / "Desktop" / "runmere" / ".env"
-        for line in env_file.read_text().splitlines() if env_file.exists() else []:
-            if line.startswith("GRAYSON_API_KEY="):
-                os.environ["GRAYSON_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
-        if not os.environ.get("GRAYSON_API_KEY"):
-            sys.exit("--grayson needs GRAYSON_API_KEY (environment or ~/Desktop/runmere/.env)")
     m = Match(out, world=Path(args.world), seed=args.seed, roots=args.roots, warmup_days=args.warmup,
               intensity=args.intensity)
-    m.grayson_budget, m.grayson_log = args.grayson_budget, out / "grayson-calls.jsonl"
     players = {"defender": args.defender, "attacker": args.attacker}
     works = {}
     for role, who in players.items():
         work = out / role
         work.mkdir()
         (work / "role").write_text(role)
-        if role == "defender" and args.grayson:
-            BRIEFS["defender"] += GRAYSON_NOTE
         (work / "brief.md").write_text(BRIEFS[role])
         (work / "notes.md").write_text("")
         (work / "data").mkdir()
@@ -162,17 +151,10 @@ def main():
         if role == "defender":
             (work / "decisions.json").write_text(json.dumps(m.decisions, default=str))
             (work / "policy.json").write_text(json.dumps({"format": 1, "rules": []}, indent=1))
-            if args.grayson:
-                (work / "grayson_enabled").write_text(f"budget of {args.grayson_budget} Grayson calls")
         else:
             (work / "menu.json").write_text(json.dumps(m.menu))
             (work / "policy.json").write_text(json.dumps({"all": {}, "rings": {}}, indent=1))
-        key_file = None
-        if role == "defender" and args.grayson:
-            key_file = out / ".grayson-key"
-            key_file.write_text(os.environ["GRAYSON_API_KEY"])
-            key_file.chmod(0o600)
-        write_wrapper(out / f"bin-{role}", work, key_file)
+        write_wrapper(out / f"bin-{role}", work)
         works[role] = work
     (out / "logs").mkdir()
 
@@ -203,24 +185,27 @@ def main():
             lines += ["", "Current policy:", (work / "policy.json").read_text()]
             (work / "status.md").write_text("\n".join(lines) + "\n")
 
-        (works["defender"] / "grayson_calls_this_turn").write_text("0")
-
         def turn(role):
             who = players[role]
-            if not who.startswith("claude:"):
+            if not is_ai(who):
                 return {"player": who, "skipped": True}
-            prompt = TASK.format(brief=BRIEFS[role], week=wk + 1, weeks=args.weeks, max_turns=args.max_turns)
-            return claude_turn(who.split(":", 1)[1], works[role], out / f"bin-{role}", prompt,
+            h = "msa" if is_player(who) else "claude"
+            prompt = TASK.format(brief=BRIEFS[role], week=wk + 1, weeks=args.weeks, max_turns=args.max_turns,
+                                 write=WRITE[h], finish=FINISH[h])
+            if h == "msa":  # the benchmark harness: mini-SWE-agent over OpenRouter
+                return play_turn(who, works[role], out / f"bin-{role}", "arena", prompt,
+                                 out / "logs" / f"{role}-week{wk + 1}.traj.json", step_limit=args.max_turns)
+            return claude_turn(who.split(":", 1)[1], works[role], out / f"bin-{role}", prompt,  # smoke tests
                                out / "logs" / f"{role}-week{wk + 1}.json", args.max_turns)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             turns = dict(zip(players, pool.map(turn, players)))
 
         deploy_error = None
-        if players["defender"].startswith("claude:"):
+        if is_ai(players["defender"]):
             deploy_error = m.deploy(json.loads((works["defender"] / "policy.json").read_text()))
         plan_problems = []
-        if players["attacker"].startswith("claude:"):
+        if is_ai(players["attacker"]):
             from arena.fw.cli import budget_problems
             plan = json.loads((works["attacker"] / "policy.json").read_text())
             plan_problems = budget_problems(plan, m.menu)
@@ -242,8 +227,6 @@ def main():
               + "  ".join(f"{r}: {t.get('turns')} turns {t.get('seconds')}s" for r, t in turns.items() if not t.get("skipped"))
               + (f"  DEPLOY ERROR: {deploy_error[:120]}" if deploy_error else ""), flush=True)
 
-    if m.grayson:
-        print("grayson:", m.grayson.stats)
     # Headline: the share of the attack's losses at the bank that the defender's policy prevented, net of the friction
     # it added (each week's no-defense replay is the denominator). Dollars stay alongside.
     exposed = sum(w["defender"]["no_defense"]["losses"] for w in weeks)
@@ -251,7 +234,7 @@ def main():
     headline = {"defender_share_prevented": round(net / exposed, 4) if exposed else 0.0,
                 "losses_exposed": round(exposed, 2), "net_saved": round(net, 2),
                 "attacker_extra_take": round(sum(scores["attacker"]), 2)}
-    summary = {"players": players, "seed": args.seed, "grayson": bool(args.grayson), "weeks": args.weeks,
+    summary = {"players": players, "seed": args.seed, "weeks": args.weeks,
                "headline": headline, "total": {r: round(sum(v), 1) for r, v in scores.items()},
                "per_week": scores}
     (out / "result.json").write_text(json.dumps({**summary, "detail": [{k: v for k, v in w.items() if k != "_truth"}

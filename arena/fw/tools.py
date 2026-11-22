@@ -1,5 +1,5 @@
-"""The defender's analysis tools behind `arena fit` and `arena grayson`. They run in the harness's process, on the
-player's own data, and return what the player may use: model blocks ready to deploy, and Grayson's answers."""
+"""The defender's analysis tools behind `arena fit`. They run in the harness's process, on the
+player's own data, and return what the player may use: model blocks ready to deploy."""
 
 import json
 import math
@@ -11,9 +11,9 @@ import duckdb
 
 def connect(work):
     """An in-memory DuckDB with a view per Parquet file of the player's data (the bank's tables and the case
-    tables) and of its saved Grayson answers."""
+    tables) """
     db = duckdb.connect()
-    for folder in (Path(work) / "data", Path(work) / "grayson"):
+    for folder in (Path(work) / "data",):
         for f in sorted(folder.glob("*.parquet")) if folder.exists() else []:
             db.execute(f"CREATE VIEW \"{f.stem}\" AS SELECT * FROM read_parquet('{f}')")
     return db
@@ -95,49 +95,3 @@ def fit(work, kind, decision, features, *, label="fraud_known", where=None, dept
     else:
         report.append("the test part has no known fraud (or only fraud): no test metrics")
     return "\n".join(report), model
-
-
-# --- arena grayson --------------------------------------------------------------------------------------------------
-
-def grayson_ask(work, table, where, question, options, name, *, limit=50, calls_file=None, budget=100):
-    """Ask Grayson `question` about each row of `table` matching `where`; save the answers as grayson/<name>.parquet
-    (key or row number, one probability column per option) and return a summary."""
-    from .grayson import ENDPOINT, parse_probabilities
-    from urllib.request import Request, urlopen
-    key = os.environ.get("GRAYSON_API_KEY", "")
-    if not key:
-        raise ValueError("Grayson isn't available in this match")
-    used = int(Path(calls_file).read_text()) if calls_file and Path(calls_file).exists() else 0
-    room = budget - used
-    if room <= 0:
-        raise ValueError(f"no Grayson analysis calls left this turn (budget {budget})")
-    db = connect(work)
-    cond = f"WHERE {where}" if where else ""
-    cur = db.execute(f'SELECT * FROM "{table}" {cond} LIMIT {min(limit, room)}')
-    cols = [c[0] for c in cur.description]
-    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-    out, errors = [], 0
-    for i, row in enumerate(rows):
-        body = {"model": "grayson-1", "data": {k: (v if isinstance(v, (int, float, str, bool)) or v is None else str(v))
-                                                for k, v in row.items()},
-                "questions": {name: {"type": "choice", "instructions": question, "criteria": options}}}
-        try:
-            req = Request(ENDPOINT, data=json.dumps(body, default=str).encode(),
-                          headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
-                                   "User-Agent": "fraud-arena/0.1"})
-            with urlopen(req, timeout=30) as resp:
-                probs = parse_probabilities(json.load(resp), name, list(options))
-        except Exception:
-            errors += 1
-            probs = {o: None for o in options}
-        out.append({"key": row.get("key", str(i)), **{f"{name}_{o}": p for o, p in probs.items()}})
-    if calls_file:
-        Path(calls_file).write_text(str(used + len(rows)))
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-    folder = Path(work) / "grayson"
-    folder.mkdir(exist_ok=True)
-    pq.write_table(pa.Table.from_pylist(out), folder / f"{name}.parquet")
-    return (f"asked Grayson about {len(rows)} rows of {table} ({errors} errors); saved as table {name!r} with columns "
-            f"key, {', '.join(f'{name}_{o}' for o in options)}. Join it on key, e.g. SELECT ... FROM {table} JOIN {name} "
-            f"USING (key). {budget - used - len(rows)} analysis calls left this turn.")

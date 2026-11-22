@@ -16,7 +16,6 @@ import runmere
 
 from . import scoring
 from .deployment import LOG, compose, world_bits
-from .grayson import GraysonRunner
 from .config import INSTITUTIONS, ScoreWeights
 
 WORLD = Path("/private/var/folders/ry/jh93lvp15pn2dnnynp0t2j8r0000gn/T/rm-main/worlds/fraud-world/world.yaml")
@@ -73,7 +72,7 @@ class Match:
         # Log the bank's cases during the warm-up too (its history, for training): the logging deployment is
         # behaviour-identical to the built-in rules, and it is taken away before the checkpoint.
         self.builtin, self.gates = world_bits(self.world_path, ROLE, "brindlemark_rules")
-        self.week_cases, self.grayson = [], None
+        self.week_cases = []
         base.deploy(ROLE, compose({}, self.builtin, self.gates))
         base.set_outside(self._outside)
         base.run_until_day(warmup_days)
@@ -122,7 +121,6 @@ class Match:
         self.script_values = {r["entity"]: {a: r.get(a) for a in cols} for r in table}
         self.deployed, self.previous, self.plan, self.runtime_error = None, None, {}, None
         self.touched = set()  # every ring attribute the attacker has set so far
-        self.grayson, self.grayson_budget, self.grayson_log = None, 200, None
         # The case log the logging rule fills (training data), starting with the warm-up's history.
         self.week_cases, self.all_cases = [], history
         self.last_truth, _ = self._export(base, self.history_truth)
@@ -130,10 +128,10 @@ class Match:
         self.cand.set_outside(self._outside)
 
     def _outside(self, case, view):
-        """Answers every outside request of the candidate run: logs the case, and asks Grayson its questions."""
-        return self._answer(case, view, log=True, grayson=self.grayson)
+        """Answers the candidate run's outside requests: logs the case (the defender's training data)."""
+        return self._answer(case, view, log=True)
 
-    def _answer(self, case, view, *, log, grayson):
+    def _answer(self, case, view, *, log):
         needs = case.get("needs", [])
         answers = {}
         if LOG in needs:
@@ -144,16 +142,12 @@ class Match:
             answers[LOG] = 0.0
         rest = [n for n in needs if n != LOG]
         if rest:
-            if not grayson:
-                raise ValueError(f"no Grayson runner for {rest}")
-            answers.update(grayson(dict(case, needs=rest), view))
+            raise ValueError(f"no outside source for {rest}")
         return answers
 
     def _quiet_outside(self, policy):
-        """An outside dispatcher for a counterfactual run of `policy`: no case logging, its own Grayson runner."""
-        section = (policy or {}).get("grayson")
-        runner = GraysonRunner(section, budget_per_week=self.grayson_budget) if section else None
-        return lambda case, view: self._answer(case, view, log=False, grayson=runner)
+        """An outside dispatcher for a counterfactual run of `policy`: no case logging."""
+        return lambda case, view: self._answer(case, view, log=False)
 
     def _script_plan(self, run):
         """Put every ring of `run` back on the match's usual pace: the scripted crews, no attacker plan."""
@@ -173,9 +167,6 @@ class Match:
 
     def _apply(self, run, policy):
         run.deploy(ROLE, compose(policy or {}, self.builtin, self.gates))
-        section = (policy or {}).get("grayson")
-        self.grayson = (GraysonRunner(section, budget_per_week=self.grayson_budget, log=self.grayson_log)
-                        if section else None)
         run.set_outside(self._outside)
 
     # --- applying the players' choices -------------------------------------------------------------------------
@@ -233,8 +224,6 @@ class Match:
         self.runtime_error = None
         week_start = self.cand
         trial = week_start.fork()
-        if self.grayson:
-            self.grayson.new_week()
         trial.set_outside(self._outside)
         self.week_cases = []
         try:

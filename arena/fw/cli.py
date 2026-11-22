@@ -31,10 +31,7 @@ USAGE = """usage:
                                the action taken and fraud_known (fraud discovered so far)
   arena results                (attacker) your syndicate's results so far
   arena note "TEXT"            append a line to your notes (kept between turns)
-  arena notes                  print your notes
-  arena grayson --table T --question "Q" --options yes,no --as NAME [--where "SQL"] [--limit 50]
-                               (defender, when Grayson is enabled) ask Grayson Q about rows of T (e.g. cases with memos
-                               or notes); saves the answers as table NAME (key + a probability per option)"""
+  arena notes                  print your notes"""
 
 
 def main(work, args):
@@ -75,8 +72,6 @@ def main(work, args):
         rule_command(work, role, args[1:])
     elif cmd == "fit" and role == "defender":
         fit_command(work, role, args[1:])
-    elif cmd == "grayson" and role == "defender":
-        grayson_command(work, args[1:])
     elif cmd == "tables" and role == "defender":
         from arena.fw.tools import connect
         db = connect(work)
@@ -181,26 +176,12 @@ def fit_command(work, role, args):
               f"arena rule add --decision {o['decision']} --when \"score.{name} > 0.8\" --action ...")
 
 
-def grayson_command(work, args):
-    if not (work / "grayson_enabled").exists():
-        sys.exit("Grayson isn't available in this match")
-    o = _opts(args, ("table", "question", "options", "as", "where", "limit"))
-    if not all(k in o for k in ("table", "question", "options", "as")):
-        sys.exit("usage: arena grayson --table T --question \"Q\" --options yes,no --as NAME [--where SQL] [--limit 50]")
-    opts = [x.strip() for x in o["options"].split(",") if x.strip()]
-    from arena.fw.tools import grayson_ask
-    try:
-        print(grayson_ask(work, o["table"], o.get("where"), o["question"], {x: x for x in opts}, o["as"],
-                          limit=int(o.get("limit", 50)), calls_file=work / "grayson_calls_this_turn"))
-    except Exception as error:
-        sys.exit(f"grayson failed: {error}")
-
 
 def policy_help(work, role):
     if role == "defender":
         decisions = json.loads((work / "decisions.json").read_text())
         lines = ["Your policy is a Runmere deployment (format 1), JSON or YAML: \"format\": 1, \"rules\", and optional \"models\"",
-                 "(and \"grayson\" when enabled). For small changes use `arena rule add/remove`; to train a model on the",
+                 "For small changes use `arena rule add/remove`; to train a model on the",
                  "bank's labeled cases use `arena fit` (it adds the model block for you with --save).",
                  "Each rule: {\"decision\": <name>, \"when\": \"<expression over obs.<feature>, score.<model>>\", \"action\": <action>}.",
                  "Per decision, the first rule whose `when` holds decides; a decision with rules but none holding takes its default;",
@@ -208,13 +189,6 @@ def policy_help(work, role):
                  "e.g. \"obs.amount > 2000 and obs.new_device\". Features can be none (missing): ordering or arithmetic on none",
                  "is an error that rolls back your whole policy, so guard them: \"obs.x != none and obs.x > 24\". Models (optional): {\"name\": {\"kind\": \"logistic\", \"features\": [...],",
                  "\"weights\": [...], \"intercept\": 0}} read as score.<name> (also kinds linear, trees).", ""]
-        if (work / "grayson_enabled").exists():
-            lines += ["GRAYSON (optional): a decision model that answers questions about a case with calibrated probabilities.",
-                      "Add a top-level \"grayson\": {\"<question_name>\": {\"question\": \"<what to judge>\", \"options\": {\"yes\": \"<meaning>\",",
-                      "\"no\": \"<meaning>\"}, \"decisions\": [\"<decision>\", ...]}} and read it in rules as outside.<question_name>.<option>",
-                      "(a probability 0-1). Grayson sees the case's observed features. It is asked only when a rule's evaluation reaches",
-                      "the read, so put cheap conditions first: \"obs.amount > 200 and outside.scam_payment.yes > 0.8\". Each week has a",
-                      (work / "grayson_enabled").read_text().strip() + "; past it, every option reads 1/n.", ""]
         lines.append("Your decisions:")
         for d in decisions:
             feats = ", ".join(f"{f[0]}:{f[1]}" for f in d["features"])
@@ -277,13 +251,7 @@ def check(work, role, policy):
         decisions = {d["name"]: d for d in json.loads((work / "decisions.json").read_text())}
         if not isinstance(policy, dict) or policy.get("format") not in (1,):
             return ['needs "format": 1']
-        grayson = policy.get("grayson")
-        if grayson is not None:
-            if not (work / "grayson_enabled").exists():
-                return ['"grayson" is not available in this match']
-            from arena.fw.grayson import check_section
-            problems += check_section(grayson, list(decisions.values()))
-        unknown = set(policy) - {"format", "name", "rules", "models", "grayson"}
+        unknown = set(policy) - {"format", "name", "rules", "models"}
         if unknown:
             problems.append(f"unknown top-level keys: {sorted(unknown)}")
         rules = policy.get("rules")
@@ -301,14 +269,8 @@ def check(work, role, policy):
             for f in re.findall(r"obs\.([a-zA-Z_0-9]+)", str(r.get("when", ""))):
                 if f not in feats:
                     problems.append(f"rules[{i}]: {d['name']} has no feature {f!r}")
-            for q, opt in re.findall(r"outside\.([a-zA-Z_0-9]+)\.([a-zA-Z_0-9]+)", str(r.get("when", ""))):
-                spec = (grayson or {}).get(q)
-                if not spec:
-                    problems.append(f"rules[{i}]: outside.{q} isn't a question in \"grayson\"")
-                elif opt not in (spec.get("options") or {}):
-                    problems.append(f"rules[{i}]: grayson.{q} has no option {opt!r}")
-                elif d["name"] not in (spec.get("decisions") or []):
-                    problems.append(f"rules[{i}]: add {d['name']!r} to grayson.{q}.decisions")
+            if "outside." in str(r.get("when", "")):
+                problems.append(f"rules[{i}]: outside.* features aren't available")
             for m in re.findall(r"score\.([a-zA-Z_0-9]+)", str(r.get("when", ""))):
                 if m not in models:
                     problems.append(f"rules[{i}]: no model named {m!r} in \"models\"")
