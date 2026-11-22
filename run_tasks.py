@@ -28,12 +28,18 @@ TASK_SETS = REPO / "task-sets.json"
 
 PROMPT = """{brief}
 ## How to work
-Only `casefile` commands work here (run them with Bash, one command per call; no pipes, redirects or other programs).
+Only `casefile` commands work here (one command per call; no pipes, redirects or other programs).
 Start with `casefile tables` and `casefile customer ...`, then investigate with `casefile query`, `casefile links` and
-`casefile customer`. {depth} You have about {max_turns} tool calls in total: keep a few for the answer. Write your answer with
-the Write tool to drafts/answer.json (only files under drafts/ can be written) and run
-`casefile submit drafts/answer.json`; fix and resubmit if it reports problems. When it is submitted, stop and reply with
-one line: your verdict."""
+`casefile customer`. {depth} You have about {max_turns} commands in total: keep a few for the answer. {write}
+`casefile submit drafts/answer.json`; fix and resubmit if it reports problems. {finish}"""
+
+# The answer-writing and finishing lines differ only in mechanics between the two harnesses.
+WRITE = {"claude": "Write your answer with the Write tool to drafts/answer.json (only files under drafts/ can be "
+                   "written) and run",
+         "msa": "Write your answer to drafts/answer.json with a heredoc (only files under drafts/ can be written) and "
+                "run"}
+FINISH = {"claude": "When it is submitted, stop and reply with one line: your verdict.",
+          "msa": "When it is submitted, end your turn."}
 
 
 # How deep to dig (prompt v2; v1 had no such line and players stopped after 2-6 commands). The same words for fraud
@@ -66,7 +72,11 @@ def write_wrapper(bin_dir, work):
     w.chmod(0o700)
 
 
+from arena.player import is_player, play_turn  # noqa: E402
+
+
 def claude_turn(model, work, bin_dir, prompt, log_path, max_turns, timeout=1200):
+    model = model.split(":", 1)[1] if model.startswith("claude:") else model
     empty_mcp = work.parent / f"{work.name}-mcp.json"
     empty_mcp.write_text('{"mcpServers": {}}')
     cmd = ["claude", "-p", prompt, "--model", model, "--tools", "Bash,Write,Read",
@@ -152,8 +162,14 @@ def cmd_run(a):
             return job, {"seconds": round(time.time() - t0, 1), "cost_usd": 0.0}
         bin_dir = out / a.task / cid / f"bin-{t}"
         write_wrapper(bin_dir, work)
-        prompt = PROMPT.format(brief=(work / "brief.md").read_text(), max_turns=max_turns, depth=DEPTH[a.task])
-        r = claude_turn(a.model, work, bin_dir, prompt, out / a.task / cid / f"trial-{t}.claude.json", max_turns)
+        h = "msa" if is_player(a.model) else "claude"
+        prompt = PROMPT.format(brief=(work / "brief.md").read_text(), max_turns=max_turns, depth=DEPTH[a.task],
+                               write=WRITE[h], finish=FINISH[h])
+        if h == "msa":  # the benchmark harness: mini-SWE-agent over OpenRouter
+            r = play_turn(a.model, work, bin_dir, "casefile", prompt, out / a.task / cid / f"trial-{t}.traj.json",
+                          step_limit=max_turns)
+        else:  # Claude Code, for smoke tests
+            r = claude_turn(a.model, work, bin_dir, prompt, out / a.task / cid / f"trial-{t}.claude.json", max_turns)
         r["submitted"] = (work / "answer.json").exists()
         r["commands"] = sum(1 for _ in open(work / "log.jsonl")) if (work / "log.jsonl").exists() else 0
         print(f"  {cid} trial {t}: {r['seconds']}s turns={r['turns']} cost=${r['cost_usd']} "
@@ -333,7 +349,7 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("--task", choices=["alert", "incident"], required=True)
     r.add_argument("--cases", required=True)
-    r.add_argument("--model", default="sonnet", help="a Claude model (sonnet, opus, ...) or 'baseline'")
+    r.add_argument("--model", default="sonnet", help="openrouter:<model id> (the benchmark harness, mini-SWE-agent), claude:<model> or a bare Claude model name (Claude Code, for smoke tests), or baseline")
     r.add_argument("--n", type=int, default=0, help="run the first N cases (default all)")
     r.add_argument("--ids", default="", help="comma-separated case ids")
     r.add_argument("--trials", type=int, default=1, help="K: independent trials per case (fresh workspace each)")
