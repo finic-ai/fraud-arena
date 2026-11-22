@@ -55,14 +55,14 @@ settings for your fraud ring; you write no messages, scripts or real-world instr
 Your ring has ten crews (numbered 1-10, each with its own specialties) running 22 schemes between them: account
 takeovers by phishing and SIM swap, card testing and card-not-present fraud, synthetic identities, promo farming,
 refund services, romance and pig-butchering scams, business email compromise, payroll diversion, mule flows and more.
-Each week you set the ring's plan (`arena policy help`): how much each crew works, which schemes it favours, where it
-attacks, timing, devices, proxy exits, identities and mule recruiting. In the plan, "rings" means your crews. At the
-start, every crew aims at Brindlemark wherever its schemes allow (plan_where "planned", plan_share_brindlemark 1).
+Each week you set the ring's plan (`arena policy help`): how much each crew works, which schemes it favours, timing,
+devices, proxy exits, identities and mule recruiting. In the plan, "rings" means your crews. Your target is fixed:
+every crew attacks Brindlemark wherever its schemes allow, for the whole match.
 
 Another AI defends Brindlemark Bank and adapts its rules each week. Scoring, per week: the same week is replayed with
 your crews on their usual habits against the very same defense. Your score is what the ring takes from BRINDLEMARK
 (mule pass-through counts at 10%) beyond that replay. A tougher defense doesn't lower your score by itself; only what
-your plan does counts. Money taken elsewhere doesn't score. You work within an effort budget
+your plan does counts. You work within an effort budget
 (see `arena policy help`): pushing some crews or schemes harder means easing off others.
 
 Your data: your own results only (`arena results`): what each crew took from each institution each week, and how many
@@ -244,7 +244,15 @@ def main():
 
     if m.grayson:
         print("grayson:", m.grayson.stats)
-    summary = {"players": players, "grayson": bool(args.grayson), "weeks": args.weeks, "total": {r: round(sum(v), 1) for r, v in scores.items()},
+    # Headline: the share of the attack's losses at the bank that the defender's policy prevented, net of the friction
+    # it added (each week's no-defense replay is the denominator). Dollars stay alongside.
+    exposed = sum(w["defender"]["no_defense"]["losses"] for w in weeks)
+    net = sum(w["defender"]["prevented"] - w["defender"]["added_friction"] for w in weeks)
+    headline = {"defender_share_prevented": round(net / exposed, 4) if exposed else 0.0,
+                "losses_exposed": round(exposed, 2), "net_saved": round(net, 2),
+                "attacker_extra_take": round(sum(scores["attacker"]), 2)}
+    summary = {"players": players, "seed": args.seed, "grayson": bool(args.grayson), "weeks": args.weeks,
+               "headline": headline, "total": {r: round(sum(v), 1) for r, v in scores.items()},
                "per_week": scores}
     (out / "result.json").write_text(json.dumps({**summary, "detail": [{k: v for k, v in w.items() if k != "_truth"}
                                                                         for w in weeks]}, indent=1, default=str))

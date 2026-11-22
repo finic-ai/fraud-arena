@@ -230,7 +230,7 @@ def policy_help(work, role):
         rng = f"{d['min']} to {d['max']}" if "min" in d else (f"one of {json.dumps(d['values'])}" if "values" in d else "see the world")
         lines.append(f"- {attr}: {rng}")
     lines.append("plan_volume multiplies every scheme of a ring; plan_tactic_<scheme> multiplies one scheme (1 = as scripted);"
-                 " plan_quiet stops the ring; plan_where 'planned' + plan_share_<institution> picks where it attacks.")
+                 " plan_quiet stops the ring. Targeting is fixed: every crew aims at Brindlemark wherever its schemes allow.")
     lines.append(f"BUDGET: the syndicate has limited people, money and mules. plan_volume summed over the 10 rings must be at "
                  f"most {VOLUME_BUDGET:g} (each unset ring counts 1, so scripted is 10), and the 22 scheme multipliers must "
                  f"sum to at most {TACTIC_BUDGET:g} (each scheme counts its highest multiplier across rings; scripted is 22). "

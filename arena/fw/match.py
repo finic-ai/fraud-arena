@@ -113,7 +113,9 @@ class Match:
                         if len(same) == 1:
                             codes[name] = lists[same[0]]
             d["code_values"] = codes
-        self.menu = ring_menu(self.world_path)
+        # Targeting is fixed: every crew aims at the defended bank for the whole match, so the attacker can't win by
+        # moving to an undefended institution. The attacker's menu has no plan_where or plan_share_* settings.
+        self.menu = {a: d for a, d in ring_menu(self.world_path).items() if a not in self.match_baseline}
         # The scripted crews' settings at the match start (after the baseline), restored in the no-attack replay.
         cols = [a for a in self.menu if a in self.cand.entities("ring").column_names] or list(self.menu)
         table = self.cand.entities("ring", ["number"] + cols).to_pylist()
@@ -197,6 +199,9 @@ class Match:
             values = dict((plan or {}).get("all") or {})
             values.update(((plan or {}).get("rings") or {}).get(str(number)) or {})
             for attr, value in values.items():
+                if attr in self.match_baseline:
+                    problems.append(f"ring {number} {attr}: targeting is fixed at Brindlemark")
+                    continue
                 if attr == "plan_volume":  # relative to the match intensity; unset means the intensity itself
                     value = float(self.intensity) * (1.0 if value is None else float(value))
                 try:
