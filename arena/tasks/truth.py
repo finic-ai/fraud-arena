@@ -56,7 +56,8 @@ class Truth:
         for cust, attr, val, ts in db.execute("""
                 SELECT a.CUST_ID, h.attribute, h.value, h.valid_from FROM map_accounts a
                 JOIN hidden h ON h.entity = a.entity AND h.type = 'account'
-                WHERE h.attribute IN ('ring', 'controlled_by') AND h.value IS NOT NULL ORDER BY h.valid_from""").fetchall():
+                WHERE h.attribute IN ('ring', 'controlled_by') AND h.value IS NOT NULL
+                ORDER BY h.valid_from, a.CUST_ID, h.attribute, h.value""").fetchall():
             self.acct_hist[cust].append((ts, attr, self.ring_name.get(val, val) if attr == "ring" else val))
         # the fraudster's ring, for operators of opened identities
         self.fraudster_ring = {e: self.ring_name.get(v) for e, v in db.execute(
@@ -65,9 +66,9 @@ class Truth:
 
     def _involvements(self):
         rows = self.db.execute("""
-            SELECT CUST_ID, sc, inst, tbl, ev, actor_type, time, load_time FROM rows
+            SELECT CUST_ID, sc, inst, tbl, ev, actor_type, time, load_time, rn FROM rows
             WHERE sc IS NOT NULL AND (lab = 'fraud' OR sc IN ('ring_cover_activity', 'ring_operation'))
-            ORDER BY time""").fetchall()
+            ORDER BY time, tbl, rn""").fetchall()
         groups = defaultdict(list)
         for r in rows:
             groups[(r[0], r[1], r[2])].append(r)

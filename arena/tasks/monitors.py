@@ -128,7 +128,7 @@ def run_monitors(out, names=None):
         if names and name not in names:
             continue
         try:
-            rows = db.execute(f"SELECT * FROM ({sql}) WHERE CUST_ID IS NOT NULL AND ts IS NOT NULL ORDER BY ts").fetchall()
+            rows = db.execute(f"SELECT * FROM ({sql}) WHERE CUST_ID IS NOT NULL AND ts IS NOT NULL ORDER BY ts, CUST_ID, ref, reason").fetchall()
         except duckdb.Error as error:
             raise RuntimeError(f"monitor {name}: {error}") from error
         seen = set()

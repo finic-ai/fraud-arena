@@ -10,15 +10,15 @@ from pathlib import Path
 from .schema import ALERT_ACTIONS, DISPOSITIONS, INCIDENT_ACTIONS, ROLES, TYPOLOGIES
 
 USAGE = """usage:
-  case brief                      the case and how it is scored
-  case tables                     the bank's tables and columns, as of the case time
-  case query "SQL"                read-only DuckDB SQL over the bank's tables as of the case time (up to 200 rows)
-  case customer CUST_ID [--all]   profile, accounts, cards and timeline (latest 150 events; --all for every one)
-  case links CUST_ID --by KIND    customers sharing each KIND key with CUST_ID, and how many customers share it
+  casefile brief                      the case and how it is scored
+  casefile tables                     the bank's tables and columns, as of the case time
+  casefile query "SQL"                read-only DuckDB SQL over the bank's tables as of the case time (up to 200 rows)
+  casefile customer CUST_ID [--all]   profile, accounts, cards and timeline (latest 150 events; --all for every one)
+  casefile links CUST_ID --by KIND    customers sharing each KIND key with CUST_ID, and how many customers share it
                                   KIND: device ip phone email address ach_originator payee merchant referral p2p_sender
-  case note "TEXT"                append a note to notes.md
-  case notes                      print your notes
-  case submit FILE                check and submit your answer (JSON file, e.g. drafts/answer.json)"""
+  casefile note "TEXT"                append a note to notes.md
+  casefile notes                      print your notes
+  casefile submit FILE                check and submit your answer (JSON file, e.g. drafts/answer.json)"""
 
 # per table: the time column and the columns that summarise a row in a customer's timeline
 TIMELINE = {
@@ -140,7 +140,7 @@ def cmd_customer(c, cust, show_all=False):
     print(f"## Timeline: {len(events)} events (" + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) + ")")
     shown = events if show_all else events[-150:]
     if len(shown) < len(events):
-        print(f"  (showing the latest {len(shown)}; `case customer {cust} --all` for all, or `case query`)")
+        print(f"  (showing the latest {len(shown)}; `casefile customer {cust} --all` for all, or `casefile query`)")
     for ts, t, s in shown:
         print(f"  {fmt(ts)}  {t:<18} {s}")
 
@@ -234,7 +234,7 @@ def run(c, args):
         cmd_tables(c)
     elif cmd == "query":
         if len(args) != 2:
-            sys.exit('usage: case query "SQL"')
+            sys.exit('usage: casefile query "SQL"')
         try:
             cur = c.db.execute(args[1])
         except Exception as error:
@@ -242,15 +242,15 @@ def run(c, args):
         print_rows(cur)
     elif cmd == "customer":
         if len(args) < 2:
-            sys.exit("usage: case customer CUST_ID [--all]")
+            sys.exit("usage: casefile customer CUST_ID [--all]")
         cmd_customer(c, args[1], "--all" in args[2:])
     elif cmd == "links":
         if len(args) != 4 or args[2] != "--by":
-            sys.exit("usage: case links CUST_ID --by KIND")
+            sys.exit("usage: casefile links CUST_ID --by KIND")
         cmd_links(c, args[1], args[3])
     elif cmd == "note":
         if len(args) != 2:
-            sys.exit('usage: case note "TEXT"')
+            sys.exit('usage: casefile note "TEXT"')
         with open(c.work / "notes.md", "a") as f:
             f.write(args[1].rstrip() + "\n")
         print("noted")
@@ -258,7 +258,7 @@ def run(c, args):
         print((c.work / "notes.md").read_text() or "(no notes yet)")
     elif cmd == "submit":
         if len(args) != 2:
-            sys.exit("usage: case submit FILE")
+            sys.exit("usage: casefile submit FILE")
         target = (c.work / args[1]).resolve() if not Path(args[1]).is_absolute() else Path(args[1]).resolve()
         if c.work.resolve() not in target.parents:
             sys.exit("the answer file must be inside your workspace (e.g. drafts/answer.json)")

@@ -141,7 +141,7 @@ def truth_groups(truth):
     import duckdb
     anchors = dict(duckdb.sql(f"SELECT instance, anchor FROM read_parquet('{truth.out / 'truth' / 'world' / 'instances.parquet'}')").fetchall())
     groups = defaultdict(list)
-    for cust in truth.ever_touched():
+    for cust in sorted(truth.ever_touched()):
         r = truth.customer(cust)
         if not r or r["role"] in ("incidental", None):
             continue
@@ -185,7 +185,7 @@ def best_seed_key(db, members, kinds=SEED_KINDS, exclude=()):
     for kind, k, hits, size in rows:
         if (kind, k) not in exclude:
             holders = [r[0] for r in db.execute("""SELECT CUST_ID FROM custkeys WHERE kind = ? AND k = ?
-                                                   AND CUST_ID IN (SELECT unnest(?)) ORDER BY first_ts""",
+                                                   AND CUST_ID IN (SELECT unnest(?)) ORDER BY first_ts, CUST_ID""",
                                                 [kind, k, ids]).fetchall()]
             return kind, k, holders, size
     return None
@@ -223,10 +223,10 @@ def pattern_seed(members, alerts, start, T):
                 first[(a["monitor"], a["cust"])] = min(first.get((a["monitor"], a["cust"]), a["ts"]), a["ts"])
     if not hits:
         return None
-    mon = max(hits, key=lambda m: (len(hits[m]), -len(allc[m])))
+    mon = max(sorted(hits), key=lambda m: (len(hits[m]), -len(allc[m])))
     if len(hits[mon]) < 3:
         return None
-    order = sorted(hits[mon], key=lambda c: first[(mon, c)])
+    order = sorted(hits[mon], key=lambda c: (first[(mon, c)], c))
     seed = order[:max(2, min(4, len(order) // 3))]
     return seed, set(order), mon, len(allc[mon])
 
@@ -308,15 +308,15 @@ def fp_incidents(out, truth, times, rng, n):
             FROM custkeys c JOIN keysize s USING (kind, k)
             WHERE s.customers BETWEEN 4 AND 30 AND c.kind IN (SELECT unnest(?))
               AND NOT EXISTS (SELECT 1 FROM custkeys c2 JOIN touched t ON t.c = c2.CUST_ID WHERE c2.kind = c.kind AND c2.k = c.k)
-            GROUP BY ALL HAVING recent >= 3 ORDER BY recent DESC""", [str(T), FP_KINDS]).fetchall()
+            GROUP BY ALL HAVING recent >= 3 ORDER BY recent DESC, c.kind, c.k""", [str(T), FP_KINDS]).fetchall()
         rows = [r for r in rows if not any(f["anomaly"]["key"] == r[1] for f in found)]
         if not rows:
             continue
-        rows.sort(key=lambda r: (used_kinds[r[0]], -r[3]))
+        rows.sort(key=lambda r: (used_kinds[r[0]], -r[3], r[0], r[1]))
         kind, key, size, recent = rows[0]
         holders = [r[0] for r in db.execute("""SELECT CUST_ID FROM custkeys WHERE kind = ? AND k = ?
                                                AND last_ts >= CAST(? AS TIMESTAMPTZ) - INTERVAL 7 DAY
-                                               ORDER BY last_ts DESC""", [kind, key, str(T)]).fetchall()]
+                                               ORDER BY last_ts DESC, CUST_ID""", [kind, key, str(T)]).fetchall()]
         seed = holders[:min(6, max(3, len(holders) // 2))]
         used_kinds[kind] += 1
         found.append({"case_time": T, "window_start": T - timedelta(days=30), "seed": seed,
@@ -377,7 +377,7 @@ def build(out, *, n_alerts=40, n_incidents=12, n_fp=3, fraud_share=0.45, seed=0,
     groups = truth_groups(truth)
     alerts = run_monitors(out)
     incidents = []
-    for gkey, members in sorted(groups.items(), key=lambda x: -len(x[1])):
+    for gkey, members in sorted(groups.items(), key=lambda x: (-len(x[1]), str(x[0]))):
         ws = waves(members)
         rng.shuffle(ws)
         made = 0
@@ -389,7 +389,7 @@ def build(out, *, n_alerts=40, n_incidents=12, n_fp=3, fraud_share=0.45, seed=0,
                 incidents.append(inc)
                 made += 1
     log(f"  true incidents available: {len(incidents)} from {len(groups)} groups")
-    incidents.sort(key=lambda x: (-len(x['key']['members'])))
+    incidents.sort(key=lambda x: (-len(x['key']['members']), str(x['key']['group'])))
     # keep a spread: at most 3 per group
     true_n = n_incidents - n_fp
     per_group, picked = Counter(), []

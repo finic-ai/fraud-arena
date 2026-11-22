@@ -1,4 +1,4 @@
-"""The briefs players read (`case brief`)."""
+"""The briefs players read (`casefile brief`)."""
 
 from .schema import ALERT_ACTIONS, INCIDENT_ACTIONS, ROLES, TYPOLOGIES
 
@@ -23,15 +23,15 @@ ROLE_HELP = """Customer roles:
   mule          the account moves others' stolen money (witting or not)
   legitimate    nothing fraudulent involves this customer"""
 
-TOOLS = """## Tools (only `case` commands work)
-  case brief                 this brief
-  case tables                the bank's tables and columns (as of the case time)
-  case query "SQL"           read-only DuckDB SQL over the bank's tables, as of the case time (up to 200 rows)
-  case customer CUST_ID      profile, accounts, cards and a timeline of the customer's activity
-  case links CUST_ID --by device|ip|phone|email|address|ach_originator|payee|merchant|referral|p2p_sender
+TOOLS = """## Tools (only `casefile` commands work)
+  casefile brief                 this brief
+  casefile tables                the bank's tables and columns (as of the case time)
+  casefile query "SQL"           read-only DuckDB SQL over the bank's tables, as of the case time (up to 200 rows)
+  casefile customer CUST_ID      profile, accounts, cards and a timeline of the customer's activity
+  casefile links CUST_ID --by device|ip|phone|email|address|ach_originator|payee|merchant|referral|p2p_sender
                              other customers sharing each key with this customer, and how many customers share it
-  case note "TEXT"           keep a note
-  case submit FILE           check and submit your answer (JSON); you may resubmit, the last valid one counts
+  casefile note "TEXT"           keep a note
+  casefile submit FILE           check and submit your answer (JSON); you may resubmit, the last valid one counts
 
 You only see what the bank had loaded by the case time (every table has LOAD_TS). Account and card *status* columns
 are not available (they would show later outcomes). Amounts are USD. Everything is simulated; no real people."""
@@ -62,7 +62,7 @@ already started by the case time; benign look-alikes come from the same monitors
 {TOOLS}
 
 ## Your answer
-Write JSON with the Write tool to drafts/answer.json, then run `case submit drafts/answer.json`:
+Write JSON with the Write tool to drafts/answer.json, then run `casefile submit drafts/answer.json`:
 {{"disposition": "fraud" | "not_fraud",
   "typology": one of {TYPOLOGIES} ("none" when not_fraud),
   "customer_role": one of {ROLES} ("legitimate" when not_fraud),
@@ -99,7 +99,7 @@ key alone does not make a customer a member. Coarse keys (shared by many custome
 {TOOLS}
 
 ## Your answer
-Write JSON with the Write tool to drafts/answer.json, then run `case submit drafts/answer.json`:
+Write JSON with the Write tool to drafts/answer.json, then run `casefile submit drafts/answer.json`:
 {{"is_incident": true | false,
   "typology": one of {TYPOLOGIES} (the incident's main family; "none" if not an incident),
   "members": [{{"cust_id": "...", "role": one of {ROLES[:3]}}}, ...]   (seed members you confirm plus every

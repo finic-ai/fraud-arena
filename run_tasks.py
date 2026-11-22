@@ -5,7 +5,7 @@
     python run_tasks.py run --task incident --cases cases/pilot --model baseline --out runs/pilot-baseline
     python run_tasks.py score --cases cases/pilot --runs runs/pilot-sonnet runs/pilot-baseline
 
-A Claude player is a headless Claude Code session per case, restricted to its own `case` command (Bash(case:*)),
+A Claude player is a headless Claude Code session per case, restricted to its own `casefile` command (Bash(casefile:*)),
 Write/Edit/Read under drafts/, no MCP servers, no user settings or hooks, and no session saved. `--model baseline`
 runs the non-LLM heuristic instead. See docs/tasks.md.
 """
@@ -24,17 +24,17 @@ REPO = Path(__file__).resolve().parent
 
 PROMPT = """{brief}
 ## How to work
-Only `case` commands work here (run them with Bash, one command per call; no pipes, redirects or other programs).
-Start with `case tables` and `case customer ...`, then investigate with `case query`, `case links` and
-`case customer`. You have about {max_turns} tool calls in total: keep a few for the answer. Write your answer with
+Only `casefile` commands work here (run them with Bash, one command per call; no pipes, redirects or other programs).
+Start with `casefile tables` and `casefile customer ...`, then investigate with `casefile query`, `casefile links` and
+`casefile customer`. You have about {max_turns} tool calls in total: keep a few for the answer. Write your answer with
 the Write tool to drafts/answer.json (only files under drafts/ can be written) and run
-`case submit drafts/answer.json`; fix and resubmit if it reports problems. When it is submitted, stop and reply with
+`casefile submit drafts/answer.json`; fix and resubmit if it reports problems. When it is submitted, stop and reply with
 one line: your verdict."""
 
 
 def write_wrapper(bin_dir, work):
     bin_dir.mkdir(parents=True, exist_ok=True)
-    w = bin_dir / "case"
+    w = bin_dir / "casefile"
     w.write_text(f'#!/bin/sh\nPYTHONPATH="{REPO}" exec "{sys.executable}" -m arena.tasks.cli "{work}" "$@"\n')
     w.chmod(0o700)
 
@@ -43,11 +43,14 @@ def claude_turn(model, work, bin_dir, prompt, log_path, max_turns, timeout=1200)
     empty_mcp = work.parent / f"{work.name}-mcp.json"
     empty_mcp.write_text('{"mcpServers": {}}')
     cmd = ["claude", "-p", prompt, "--model", model, "--tools", "Bash,Write,Read",
-           "--allowedTools", "Bash(case:*)", "Edit(drafts/**)", "Read(drafts/**)",
+           "--allowedTools", "Bash(casefile:*)", "Edit(drafts/**)", "Read(drafts/**)",
            "--strict-mcp-config", "--mcp-config", str(empty_mcp), "--setting-sources", "project",
            "--no-session-persistence", "--max-turns", str(max_turns), "--output-format", "json"]
     env = dict(os.environ)
     env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
+    token_file = Path(os.environ.get("CLAUDE_TOKEN_FILE", Path.home() / ".claude-token"))
+    if not env.get("CLAUDE_CODE_OAUTH_TOKEN") and not env.get("ANTHROPIC_API_KEY") and token_file.exists():
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token_file.read_text().strip()  # the launcher's login, when not exported
     started = time.time()
     try:
         p = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=timeout)
