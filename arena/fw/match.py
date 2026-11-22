@@ -114,6 +114,10 @@ class Match:
                             codes[name] = lists[same[0]]
             d["code_values"] = codes
         self.menu = ring_menu(self.world_path)
+        # The scripted crews' settings at the match start (after the baseline), restored in the no-attack replay.
+        cols = [a for a in self.menu if a in self.cand.entities("ring").column_names] or list(self.menu)
+        table = self.cand.entities("ring", ["number"] + cols).to_pylist()
+        self.script_values = {r["entity"]: {a: r.get(a) for a in cols} for r in table}
         self.deployed, self.previous, self.plan, self.runtime_error = None, None, {}, None
         self.touched = set()  # every ring attribute the attacker has set so far
         self.grayson, self.grayson_budget, self.grayson_log = None, 200, None
@@ -153,11 +157,16 @@ class Match:
         """Put every ring of `run` back on the match's usual pace: the scripted crews, no attacker plan."""
         touched = set(self.match_baseline) | {"plan_volume"} | self.touched
         for ring in self.rings.values():
+            start = self.script_values.get(ring, {})
             for attr in touched:
                 if attr == "plan_volume":
                     value = float(self.intensity)
+                elif attr in self.match_baseline:
+                    value = self.match_baseline[attr]
                 else:
-                    value = self.match_baseline.get(attr)
+                    value = start.get(attr)
+                if value is None and attr not in start:
+                    continue
                 run.intervene("ring", ring, attr, value)
 
     def _apply(self, run, policy):
