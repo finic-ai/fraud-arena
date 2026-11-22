@@ -15,6 +15,8 @@ import duckdb
 import runmere
 
 from . import scoring
+from .deployment import LOG, compose, world_bits
+from .grayson import GraysonRunner
 from .config import INSTITUTIONS, ScoreWeights
 
 WORLD = Path("/private/var/folders/ry/jh93lvp15pn2dnnynp0t2j8r0000gn/T/rm-main/worlds/fraud-world/world.yaml")
@@ -66,7 +68,17 @@ class Match:
         self.week_days, self.warmup_days = week_days, warmup_days
         self.world = runmere.World.load(str(self.world_path))
         base = self.world.start(seed, 1, roots)
+        # Log the bank's cases during the warm-up too (its history, for training): the logging deployment is
+        # behaviour-identical to the built-in rules, and it is taken away before the checkpoint.
+        self.builtin, self.gates = world_bits(self.world_path, ROLE, "brindlemark_rules")
+        self.week_cases, self.grayson = [], None
+        base.deploy(ROLE, compose({}, self.builtin, self.gates))
+        base.set_outside(self._outside)
         base.run_until_day(warmup_days)
+        history = self.week_cases
+        base.undeploy(ROLE)
+        base.set_outside(None)
+        self.history_truth = self.out / "truth" / "warmup"
         ckpt = base.checkpoint()
         self.cand = runmere.Run.restore(self.world, ckpt, roots)
         self.ref = runmere.Run.restore(self.world, ckpt, roots)
@@ -89,6 +101,34 @@ class Match:
             d["code_values"] = codes
         self.menu = ring_menu(self.world_path)
         self.deployed, self.previous, self.plan, self.runtime_error = None, None, {}, None
+        self.grayson, self.grayson_budget, self.grayson_log = None, 200, None
+        # The case log the logging rule fills (training data), starting with the warm-up's history.
+        self.week_cases, self.all_cases = [], history
+        self.last_truth, _ = self._export(base, self.history_truth)
+        self.cand.deploy(ROLE, compose({}, self.builtin, self.gates))
+        self.cand.set_outside(self._outside)
+
+    def _outside(self, case, view):
+        """Answers every outside request of the candidate run: logs the case, and asks Grayson its questions."""
+        needs = case.get("needs", [])
+        answers = {}
+        if LOG in needs:
+            self.week_cases.append({"key": case.get("key"), "decision": case.get("decision"), "time": case.get("time"),
+                                    "features": case.get("features") or {}, "identifiers": case.get("identifiers") or {}})
+            answers[LOG] = 0.0
+        rest = [n for n in needs if n != LOG]
+        if rest:
+            if not self.grayson:
+                raise ValueError(f"no Grayson runner for {rest}")
+            answers.update(self.grayson(dict(case, needs=rest), view))
+        return answers
+
+    def _apply(self, run, policy):
+        run.deploy(ROLE, compose(policy or {}, self.builtin, self.gates))
+        section = (policy or {}).get("grayson")
+        self.grayson = (GraysonRunner(section, budget_per_week=self.grayson_budget, log=self.grayson_log)
+                        if section else None)
+        run.set_outside(self._outside)
 
     # --- applying the players' choices -------------------------------------------------------------------------
 
@@ -97,10 +137,7 @@ class Match:
         message, or None. A failed deploy leaves the previous policy in place."""
         try:
             self.previous = self.deployed
-            if policy is None:
-                self.cand.undeploy(ROLE)
-            else:
-                self.cand.deploy(ROLE, policy)
+            self._apply(self.cand, policy)
             self.deployed = policy
             return None
         except Exception as error:
@@ -129,6 +166,10 @@ class Match:
         start = iso(self.cand.time)
         self.runtime_error = None
         trial = self.cand.fork()
+        if self.grayson:
+            self.grayson.new_week()
+        trial.set_outside(self._outside)
+        self.week_cases = []
         try:
             trial.run_until_day(end_day)
             self.cand = trial
@@ -136,7 +177,8 @@ class Match:
             # The defender's rules stopped the run (e.g. ordering a `none` feature): keep the previous policy and
             # play the week from the untouched candidate state.
             self.runtime_error = f"{type(error).__name__}: {error}"
-            self.cand.deploy(ROLE, self.previous) if self.previous else self.cand.undeploy(ROLE)
+            self.week_cases = []
+            self._apply(self.cand, self.previous)
             self.deployed = self.previous
             self.cand.run_until_day(end_day)
         self.ref.run_until_day(end_day)
@@ -144,6 +186,8 @@ class Match:
         self.week += 1
         wdir = self.out / "truth" / f"week{self.week}"
         cand_truth, owners = self._export(self.cand, wdir / "candidate")
+        self.all_cases += self.week_cases
+        self.last_truth = cand_truth
         ref_truth, _ = self._export(self.ref, wdir / "reference")
         d_c = scoring.window_score(cand_truth, owners, institution=INSTITUTION, role=ROLE, start=start, end=end,
                                    weights=WEIGHTS)
@@ -220,11 +264,45 @@ class Match:
             shutil.rmtree(data)
         data.mkdir(parents=True)
         self.cand.write_observer(OBSERVER, str(data))
+        self._write_cases(data)
         db = duckdb.connect(str(data / "bank.duckdb"))
         for f in sorted(data.glob("*.parquet")):
             db.execute(f"CREATE VIEW {f.stem} AS SELECT * FROM read_parquet('{f}')")
         db.close()
         return data
+
+    def _write_cases(self, data):
+        """One table per decision of the cases the bank decided during the match: observed features, identifiers,
+        the action taken, and `fraud_known`: true only for fraud the bank has discovered by now (truth's discovery
+        time), as a fraud team's labels are. Undiscovered fraud reads false, as it would at a bank."""
+        if not self.all_cases or self.last_truth is None:
+            return
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        T = self.last_truth
+        now = iso(self.cand.time)
+        # A case's key is its own id, not the decision's key: cases join the decision log on (decision, time).
+        known = {(d, t) for d, t in duckdb.sql(f"""
+            SELECT DISTINCT d.decision, epoch_ms(d.time) FROM '{T}/decisions.parquet' d
+            JOIN '{T}/events.parquet' e ON e.key = d.key
+            JOIN '{T}/labels.parquet' l ON l.cause_instance = e.cause_instance
+            WHERE d.role = '{ROLE}' AND e.cause_label = 'fraud' AND l.discovered_at IS NOT NULL
+              AND l.discovered_at <= TIMESTAMPTZ '{now}'""").fetchall()}
+        actions = {(d, t): a for d, t, a in duckdb.sql(
+            f"SELECT decision, epoch_ms(time), action FROM '{T}/decisions.parquet' WHERE role = '{ROLE}'").fetchall()}
+        by_decision = {}
+        for c in self.all_cases:
+            dt = (c["decision"], int(c["time"]))
+            row = {"key": c["key"], "ts": iso(c["time"]), "action": actions.get(dt), "fraud_known": dt in known}
+            for k, v in c["identifiers"].items():
+                row["id_" + k.split(".")[-1].lower()] = v
+            for k, v in c["features"].items():
+                row[k] = v if isinstance(v, (int, float, str, bool)) or v is None else str(v)
+            by_decision.setdefault(c["decision"], []).append(row)
+        for decision, rows in by_decision.items():
+            cols = sorted({k for r in rows for k in r}, key=lambda k: (k not in ("key", "ts", "action", "fraud_known"), k))
+            table = pa.Table.from_pylist([{k: r.get(k) for k in cols} for r in rows])
+            pq.write_table(table, data / f"cases_{decision.replace('brind_', '')}.parquet")
 
     def attacker_view(self, weekly_results, cand_truth):
         """What the syndicate knows: per week, ring and scheme, the schemes it started and what each ring took from

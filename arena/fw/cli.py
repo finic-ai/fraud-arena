@@ -14,13 +14,27 @@ USAGE = """usage:
   arena brief                  your role, goal and how scoring works
   arena policy help            the policy format: your decisions/features (defender) or the plan menu (attacker)
   arena policy show            print your current policy
-  arena policy set FILE        check the JSON policy in FILE (write it with the Write tool, e.g. drafts/policy.json)
-                               and save it for the next week
+  arena policy set FILE        check the policy in FILE (JSON or YAML; write it with the Write tool, e.g.
+                               drafts/week2.yaml) and save it for the next week
+  arena rule list              (defender) your rules, numbered
+  arena rule add --decision D --when "EXPR" --action A [--at N]
+                               (defender) add one rule (at position N, default the end) and save
+  arena rule remove N          (defender) remove rule N and save
+  arena fit logistic|trees --decision D --features a,b,c [--where "SQL"] [--balanced] [--depth 3] [--trees 60]
+                               [--save NAME]
+                               (defender) train a scoring model on the case table of decision D (label: fraud_known),
+                               report test metrics, and with --save add it to your policy as models.NAME (read in
+                               rules as score.NAME)
   arena tables                 (defender) the bank's tables and their columns
-  arena query "SQL"            (defender) a read-only DuckDB query on the bank's tables, up to 200 rows
+  arena query "SQL"            (defender) a read-only DuckDB query on the bank's tables, up to 200 rows. The
+                               cases_<decision> tables hold every decision the bank made, with its observed features,
+                               the action taken and fraud_known (fraud discovered so far)
   arena results                (attacker) your syndicate's results so far
   arena note "TEXT"            append a line to your notes (kept between turns)
-  arena notes                  print your notes"""
+  arena notes                  print your notes
+  arena grayson --table T --question "Q" --options yes,no --as NAME [--where "SQL"] [--limit 50]
+                               (defender, when Grayson is enabled) ask Grayson Q about rows of T (e.g. cases with memos
+                               or notes); saves the answers as table NAME (key + a probability per option)"""
 
 
 def main(work, args):
@@ -46,23 +60,33 @@ def main(work, args):
         text = target.read_text()
         try:
             policy = json.loads(text)
-        except Exception as error:
-            sys.exit(f"policy NOT saved: not valid JSON ({error})")
+        except Exception:
+            try:
+                import yaml
+                policy = yaml.safe_load(text)
+            except Exception as error:
+                sys.exit(f"policy NOT saved: not valid JSON or YAML ({error})")
         problems = check(work, role, policy)
         if problems:
             sys.exit("policy NOT saved:\n" + "\n".join(f"  - {p}" for p in problems[:30]))
         (work / "policy.json").write_text(json.dumps(policy, indent=1))
         print("policy saved; it takes effect at the start of next week")
+    elif cmd == "rule" and role == "defender":
+        rule_command(work, role, args[1:])
+    elif cmd == "fit" and role == "defender":
+        fit_command(work, role, args[1:])
+    elif cmd == "grayson" and role == "defender":
+        grayson_command(work, args[1:])
     elif cmd == "tables" and role == "defender":
-        import duckdb
-        db = duckdb.connect(str(work / "data" / "bank.duckdb"), read_only=True)
+        from arena.fw.tools import connect
+        db = connect(work)
         for (name,) in db.execute("SELECT view_name FROM duckdb_views() WHERE NOT internal ORDER BY 1").fetchall():
             cols = [c[0] for c in db.execute(f"DESCRIBE {name}").fetchall()]
             n = db.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
             print(f"{name} ({n} rows): {', '.join(cols)}")
     elif cmd == "query" and role == "defender" and len(args) == 2:
-        import duckdb
-        db = duckdb.connect(str(work / "data" / "bank.duckdb"), read_only=True)
+        from arena.fw.tools import connect
+        db = connect(work)
         try:
             cur = db.execute(args[1])
         except Exception as error:
@@ -86,16 +110,112 @@ def main(work, args):
         sys.exit(USAGE)
 
 
+def _opts(args, flags, bools=()):
+    out, i = {}, 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("--") and a[2:] in bools:
+            out[a[2:]] = True
+            i += 1
+        elif a.startswith("--") and a[2:] in flags and i + 1 < len(args):
+            out[a[2:]] = args[i + 1]
+            i += 2
+        else:
+            sys.exit(f"unexpected argument {a!r}")
+    return out
+
+
+def _save(work, role, policy, what):
+    problems = check(work, role, policy)
+    if problems:
+        sys.exit(f"{what} NOT saved:\n" + "\n".join(f"  - {p}" for p in problems[:30]))
+    (work / "policy.json").write_text(json.dumps(policy, indent=1))
+    print(f"{what} saved; the policy takes effect at the start of next week")
+
+
+def rule_command(work, role, args):
+    policy = json.loads((work / "policy.json").read_text())
+    rules = policy.setdefault("rules", [])
+    if args[:1] == ["list"]:
+        for i, r in enumerate(rules, 1):
+            print(f"{i}. {r['decision']}: when {r.get('when', 'always')} -> {r['action']}")
+        return print("" if rules else "(no rules: every decision keeps the bank's built-in rules)")
+    if args[:1] == ["remove"] and len(args) == 2 and args[1].isdigit() and 1 <= int(args[1]) <= len(rules):
+        rules.pop(int(args[1]) - 1)
+        return _save(work, role, policy, "rule removal")
+    if args[:1] == ["add"]:
+        o = _opts(args[1:], ("decision", "when", "action", "at"))
+        if "decision" not in o or "action" not in o:
+            sys.exit("usage: arena rule add --decision D --when \"EXPR\" --action A [--at N]")
+        r = {"decision": o["decision"], "action": o["action"]}
+        if o.get("when"):
+            r["when"] = o["when"]
+        at = int(o["at"]) - 1 if o.get("at", "").isdigit() else len(rules)
+        rules.insert(max(0, min(at, len(rules))), r)
+        return _save(work, role, policy, "rule")
+    sys.exit("usage: arena rule list | add --decision D --when \"EXPR\" --action A [--at N] | remove N")
+
+
+def fit_command(work, role, args):
+    if not args or args[0] not in ("logistic", "trees"):
+        sys.exit("usage: arena fit logistic|trees --decision D --features a,b,c [--where SQL] [--balanced] [--save NAME]")
+    o = _opts(args[1:], ("decision", "features", "where", "depth", "trees", "save"), bools=("balanced",))
+    if "decision" not in o or "features" not in o:
+        sys.exit("--decision and --features are required")
+    from arena.fw.tools import fit
+    try:
+        report, model = fit(work, args[0], o["decision"], [f.strip() for f in o["features"].split(",") if f.strip()],
+                            where=o.get("where"), depth=int(o.get("depth", 3)), trees=int(o.get("trees", 60)),
+                            balanced=bool(o.get("balanced")))
+    except Exception as error:
+        sys.exit(f"fit failed: {error}")
+    print(report)
+    if o.get("save"):
+        name = o["save"]
+        if not name.replace("_", "").isalnum() or not name.islower():
+            sys.exit("--save NAME: lower case letters, digits and _")
+        policy = json.loads((work / "policy.json").read_text())
+        policy.setdefault("models", {})[name] = model
+        _save(work, role, policy, f"model {name!r}")
+        print(f"use it in rules as score.{name} (a probability 0-1), e.g. "
+              f"arena rule add --decision {o['decision']} --when \"score.{name} > 0.8\" --action ...")
+
+
+def grayson_command(work, args):
+    if not (work / "grayson_enabled").exists():
+        sys.exit("Grayson isn't available in this match")
+    o = _opts(args, ("table", "question", "options", "as", "where", "limit"))
+    if not all(k in o for k in ("table", "question", "options", "as")):
+        sys.exit("usage: arena grayson --table T --question \"Q\" --options yes,no --as NAME [--where SQL] [--limit 50]")
+    opts = [x.strip() for x in o["options"].split(",") if x.strip()]
+    from arena.fw.tools import grayson_ask
+    try:
+        print(grayson_ask(work, o["table"], o.get("where"), o["question"], {x: x for x in opts}, o["as"],
+                          limit=int(o.get("limit", 50)), calls_file=work / "grayson_calls_this_turn"))
+    except Exception as error:
+        sys.exit(f"grayson failed: {error}")
+
+
 def policy_help(work, role):
     if role == "defender":
         decisions = json.loads((work / "decisions.json").read_text())
-        lines = ["Your policy is a Runmere deployment (format 1): JSON with \"format\": 1, \"rules\" and optional \"models\".",
+        lines = ["Your policy is a Runmere deployment (format 1), JSON or YAML: \"format\": 1, \"rules\", and optional \"models\"",
+                 "(and \"grayson\" when enabled). For small changes use `arena rule add/remove`; to train a model on the",
+                 "bank's labeled cases use `arena fit` (it adds the model block for you with --save).",
                  "Each rule: {\"decision\": <name>, \"when\": \"<expression over obs.<feature>, score.<model>>\", \"action\": <action>}.",
                  "Per decision, the first rule whose `when` holds decides; a decision with rules but none holding takes its default;",
                  "a decision with no rules keeps the bank's built-in policy. Expressions: and/or/not, comparisons, arithmetic,",
                  "e.g. \"obs.amount > 2000 and obs.new_device\". Features can be none (missing): ordering or arithmetic on none",
                  "is an error that rolls back your whole policy, so guard them: \"obs.x != none and obs.x > 24\". Models (optional): {\"name\": {\"kind\": \"logistic\", \"features\": [...],",
-                 "\"weights\": [...], \"intercept\": 0}} read as score.<name> (also kinds linear, trees).", "", "Your decisions:"]
+                 "\"weights\": [...], \"intercept\": 0}} read as score.<name> (also kinds linear, trees).", ""]
+        if (work / "grayson_enabled").exists():
+            lines += ["GRAYSON (optional): a decision model that answers questions about a case with calibrated probabilities.",
+                      "Add a top-level \"grayson\": {\"<question_name>\": {\"question\": \"<what to judge>\", \"options\": {\"yes\": \"<meaning>\",",
+                      "\"no\": \"<meaning>\"}, \"decisions\": [\"<decision>\", ...]}} and read it in rules as outside.<question_name>.<option>",
+                      "(a probability 0-1). Grayson sees the case's observed features. It is asked only when a rule's evaluation reaches",
+                      "the read, so put cheap conditions first: \"obs.amount > 200 and outside.scam_payment.yes > 0.8\". Each week has a",
+                      (work / "grayson_enabled").read_text().strip() + "; past it, every option reads 1/n.", ""]
+        lines.append("Your decisions:")
         for d in decisions:
             feats = ", ".join(f"{f[0]}:{f[1]}" for f in d["features"])
             lines.append(f"- {d['name']}: actions {d['actions']} (default {d['default_action']})\n    features: {feats}")
@@ -157,6 +277,15 @@ def check(work, role, policy):
         decisions = {d["name"]: d for d in json.loads((work / "decisions.json").read_text())}
         if not isinstance(policy, dict) or policy.get("format") not in (1,):
             return ['needs "format": 1']
+        grayson = policy.get("grayson")
+        if grayson is not None:
+            if not (work / "grayson_enabled").exists():
+                return ['"grayson" is not available in this match']
+            from arena.fw.grayson import check_section
+            problems += check_section(grayson, list(decisions.values()))
+        unknown = set(policy) - {"format", "name", "rules", "models", "grayson"}
+        if unknown:
+            problems.append(f"unknown top-level keys: {sorted(unknown)}")
         rules = policy.get("rules")
         if not isinstance(rules, list):
             return ['needs "rules": [...]']
@@ -172,6 +301,14 @@ def check(work, role, policy):
             for f in re.findall(r"obs\.([a-zA-Z_0-9]+)", str(r.get("when", ""))):
                 if f not in feats:
                     problems.append(f"rules[{i}]: {d['name']} has no feature {f!r}")
+            for q, opt in re.findall(r"outside\.([a-zA-Z_0-9]+)\.([a-zA-Z_0-9]+)", str(r.get("when", ""))):
+                spec = (grayson or {}).get(q)
+                if not spec:
+                    problems.append(f"rules[{i}]: outside.{q} isn't a question in \"grayson\"")
+                elif opt not in (spec.get("options") or {}):
+                    problems.append(f"rules[{i}]: grayson.{q} has no option {opt!r}")
+                elif d["name"] not in (spec.get("decisions") or []):
+                    problems.append(f"rules[{i}]: add {d['name']!r} to grayson.{q}.decisions")
             for m in re.findall(r"score\.([a-zA-Z_0-9]+)", str(r.get("when", ""))):
                 if m not in models:
                     problems.append(f"rules[{i}]: no model named {m!r} in \"models\"")

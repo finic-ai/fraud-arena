@@ -36,8 +36,13 @@ behaviour: fraud losses you prevent at Brindlemark, minus the extra friction you
 $3 + 10% of the amount, step-ups $0.50, holds $2, reviews $15, alerts $8, blocks $25, account closures $200).
 
 Your data: the bank's own tables (`arena tables`, `arena query`): customers, accounts, card authorizations, logins,
-transfers, applications, disputes, alerts and more, as the bank sees them. Fraud labels arrive the way they do in a
-bank: through disputes, chargebacks and reports, late and incomplete. You never see the syndicate's plans.
+transfers, applications, disputes, alerts and more, as the bank sees them; and cases_<decision> tables with every
+decision the bank made (its observed features, including payment memos and notes, the action taken, and fraud_known:
+fraud the bank has discovered so far, late and incomplete as at a real bank). You never see the syndicate's plans.
+
+Your tools: `arena rule add/remove/list` for quick rule changes, `arena fit logistic|trees` to train a scoring model on
+the labeled cases (it reports test metrics and with --save adds the model to your policy), and `arena policy set` for
+whole policies (JSON or YAML).
 """,
     "attacker": """# You are the ATTACKER: the fraud syndicate (Fraud Arena)
 
@@ -70,11 +75,12 @@ Keep short notes for next week with `arena note "..."`. Only `arena` commands wo
 When your policy is saved, stop and reply with one line summarizing what you changed and why."""
 
 
-def write_wrapper(bin_dir, work):
+def write_wrapper(bin_dir, work, key_file=None):
     bin_dir.mkdir(parents=True, exist_ok=True)
     w = bin_dir / "arena"
-    w.write_text(f'#!/bin/sh\nPYTHONPATH="{REPO}" exec "{sys.executable}" -m arena.fw.cli "{work}" "$@"\n')
-    w.chmod(0o755)
+    key = f'GRAYSON_API_KEY="$(cat "{key_file}")" ' if key_file else ""
+    w.write_text(f'#!/bin/sh\n{key}PYTHONPATH="{REPO}" exec "{sys.executable}" -m arena.fw.cli "{work}" "$@"\n')
+    w.chmod(0o700)
 
 
 def claude_turn(model, work, bin_dir, prompt, log_path, max_turns):
@@ -84,7 +90,8 @@ def claude_turn(model, work, bin_dir, prompt, log_path, max_turns):
            "--allowedTools", "Bash(arena:*)", "Edit(drafts/**)", "Read(drafts/**)",
            "--strict-mcp-config", "--mcp-config", str(empty_mcp), "--setting-sources", "project",
            "--no-session-persistence", "--max-turns", str(max_turns), "--output-format", "json"]
-    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+    env = {k: v for k, v in os.environ.items() if k != "GRAYSON_API_KEY"}
+    env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
     started = time.time()
     try:
         p = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=1200)
@@ -106,12 +113,17 @@ def main():
     ap.add_argument("--roots", type=int, default=1500)
     ap.add_argument("--warmup", type=int, default=60)
     ap.add_argument("--max-turns", type=int, default=25)
+    ap.add_argument("--grayson", action="store_true", help="give the defender Grayson (needs GRAYSON_API_KEY)")
+    ap.add_argument("--grayson-budget", type=int, default=200, help="Grayson calls per week")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
+    if args.grayson and not os.environ.get("GRAYSON_API_KEY"):
+        sys.exit("--grayson needs GRAYSON_API_KEY in the environment")
     m = Match(out, seed=args.seed, roots=args.roots, warmup_days=args.warmup)
+    m.grayson_budget, m.grayson_log = args.grayson_budget, out / "grayson-calls.jsonl"
     players = {"defender": args.defender, "attacker": args.attacker}
     works = {}
     for role, who in players.items():
@@ -125,10 +137,17 @@ def main():
         if role == "defender":
             (work / "decisions.json").write_text(json.dumps(m.decisions, default=str))
             (work / "policy.json").write_text(json.dumps({"format": 1, "rules": []}, indent=1))
+            if args.grayson:
+                (work / "grayson_enabled").write_text(f"budget of {args.grayson_budget} Grayson calls")
         else:
             (work / "menu.json").write_text(json.dumps(m.menu))
             (work / "policy.json").write_text(json.dumps({"all": {}, "rings": {}}, indent=1))
-        write_wrapper(out / f"bin-{role}", work)
+        key_file = None
+        if role == "defender" and args.grayson:
+            key_file = out / ".grayson-key"
+            key_file.write_text(os.environ["GRAYSON_API_KEY"])
+            key_file.chmod(0o600)
+        write_wrapper(out / f"bin-{role}", work, key_file)
         works[role] = work
     (out / "logs").mkdir()
 
@@ -150,6 +169,8 @@ def main():
                 lines += ["", f"YOUR LAST POLICY FAILED TO DEPLOY (the previous one stayed): {err}"]
             lines += ["", "Current policy:", (work / "policy.json").read_text()]
             (work / "status.md").write_text("\n".join(lines) + "\n")
+
+        (works["defender"] / "grayson_calls_this_turn").write_text("0")
 
         def turn(role):
             who = players[role]
@@ -186,7 +207,9 @@ def main():
               + "  ".join(f"{r}: {t.get('turns')} turns {t.get('seconds')}s" for r, t in turns.items() if not t.get("skipped"))
               + (f"  DEPLOY ERROR: {deploy_error[:120]}" if deploy_error else ""), flush=True)
 
-    summary = {"players": players, "weeks": args.weeks, "total": {r: round(sum(v), 1) for r, v in scores.items()},
+    if m.grayson:
+        print("grayson:", m.grayson.stats)
+    summary = {"players": players, "grayson": bool(args.grayson), "weeks": args.weeks, "total": {r: round(sum(v), 1) for r, v in scores.items()},
                "per_week": scores}
     (out / "result.json").write_text(json.dumps({**summary, "detail": [{k: v for k, v in w.items() if k != "_truth"}
                                                                         for w in weeks]}, indent=1, default=str))

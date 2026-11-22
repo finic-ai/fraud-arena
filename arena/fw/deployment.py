@@ -1,0 +1,62 @@
+"""Turn the defender's policy into the deployment the engine runs, with the harness's case logging.
+
+Every decision of the defender's role gets, first, a logging rule that asks the harness for a numeric outside feature
+(`arena_log`) and never fires: the harness records the case's observed features and identifiers, which become the
+defender's training data for `arena fit` and the material `arena grayson` reads. After it come the defender's rules
+for the decision, or, for a decision the defender wrote no rules for, the bank's built-in rules (copied from the
+world's `brindlemark_rules`), so leaving a decision alone keeps the bank's behaviour exactly.
+"""
+
+from pathlib import Path
+
+import yaml
+
+LOG = "arena_log"
+
+
+def world_bits(world_path, role, builtin_policy):
+    spec = yaml.safe_load(Path(world_path).read_text())
+    env = spec.get("env") or {}
+    builtin = [dict(r) for r in env["policies"][builtin_policy]["rules"]]
+    gates = {}
+    for name, d in (env.get("decisions") or {}).items():
+        if d.get("role") != role:
+            continue
+        at = d.get("at") or {}
+        gates[name] = "event" if ("event" in at and not at.get("after")) else "wait"
+    return builtin, gates
+
+
+def compose(policy, builtin, gates, *, log=True):
+    """The deployment for `policy` (the defender's JSON: rules, models, grayson)."""
+    policy = policy or {}
+    own = list(policy.get("rules") or [])
+    covered = {r["decision"] for r in own}
+    rules = []
+    for decision in gates:
+        if log:
+            rules.append({"decision": decision, "when": f"outside.{LOG} != none and outside.{LOG} > 1",
+                          "action": _any_action(decision, builtin, own)})
+        rules += [r for r in own if r["decision"] == decision] if decision in covered else \
+                 [r for r in builtin if r["decision"] == decision]
+    dep = {"format": 5, "rules": rules}
+    if policy.get("models"):
+        dep["models"] = policy["models"]
+    outside = {LOG: {"type": "number"}} if log else {}
+    grayson = policy.get("grayson") or {}
+    for q, spec in grayson.items():
+        outside[q] = {"options": list(spec["options"])}
+    if outside:
+        dep["outside"] = outside
+        reading = set(gates) if log else {d for spec in grayson.values() for d in spec["decisions"]}
+        dep["external"] = {d: ({} if gates.get(d) == "event" else {"timeout": "1h"}) for d in reading}
+    else:
+        dep["format"] = 1
+    return dep
+
+
+def _any_action(decision, builtin, own):
+    for r in own + builtin:
+        if r["decision"] == decision:
+            return r["action"]
+    raise ValueError(f"no action known for {decision}")
