@@ -22,6 +22,8 @@ from .config import INSTITUTIONS, ScoreWeights
 WORLD = Path("/private/var/folders/ry/jh93lvp15pn2dnnynp0t2j8r0000gn/T/rm-main/worlds/fraud-world/world.yaml")
 INSTITUTION, ROLE, OBSERVER = "brindlemark", "brind_defender", "brindlemark"
 WEIGHTS = ScoreWeights()
+# Victim reports: the share of fraud whose victim reports it, and the delay range in days after it became knowable.
+REPORT_SHARE, REPORT_DAYS = 0.8, (2, 10)
 
 
 def iso(ms):
@@ -113,6 +115,7 @@ class Match:
             d["code_values"] = codes
         self.menu = ring_menu(self.world_path)
         self.deployed, self.previous, self.plan, self.runtime_error = None, None, {}, None
+        self.touched = set()  # every ring attribute the attacker has set so far
         self.grayson, self.grayson_budget, self.grayson_log = None, 200, None
         # The case log the logging rule fills (training data), starting with the warm-up's history.
         self.week_cases, self.all_cases = [], history
@@ -122,18 +125,40 @@ class Match:
 
     def _outside(self, case, view):
         """Answers every outside request of the candidate run: logs the case, and asks Grayson its questions."""
+        return self._answer(case, view, log=True, grayson=self.grayson)
+
+    def _answer(self, case, view, *, log, grayson):
         needs = case.get("needs", [])
         answers = {}
         if LOG in needs:
-            self.week_cases.append({"key": case.get("key"), "decision": case.get("decision"), "time": case.get("time"),
-                                    "features": case.get("features") or {}, "identifiers": case.get("identifiers") or {}})
+            if log:
+                self.week_cases.append({"key": case.get("key"), "decision": case.get("decision"),
+                                        "time": case.get("time"), "features": case.get("features") or {},
+                                        "identifiers": case.get("identifiers") or {}})
             answers[LOG] = 0.0
         rest = [n for n in needs if n != LOG]
         if rest:
-            if not self.grayson:
+            if not grayson:
                 raise ValueError(f"no Grayson runner for {rest}")
-            answers.update(self.grayson(dict(case, needs=rest), view))
+            answers.update(grayson(dict(case, needs=rest), view))
         return answers
+
+    def _quiet_outside(self, policy):
+        """An outside dispatcher for a counterfactual run of `policy`: no case logging, its own Grayson runner."""
+        section = (policy or {}).get("grayson")
+        runner = GraysonRunner(section, budget_per_week=self.grayson_budget) if section else None
+        return lambda case, view: self._answer(case, view, log=False, grayson=runner)
+
+    def _script_plan(self, run):
+        """Put every ring of `run` back on the match's usual pace: the scripted crews, no attacker plan."""
+        touched = set(self.match_baseline) | {"plan_volume"} | self.touched
+        for ring in self.rings.values():
+            for attr in touched:
+                if attr == "plan_volume":
+                    value = float(self.intensity)
+                else:
+                    value = self.match_baseline.get(attr)
+                run.intervene("ring", ring, attr, value)
 
     def _apply(self, run, policy):
         run.deploy(ROLE, compose(policy or {}, self.builtin, self.gates))
@@ -170,16 +195,30 @@ class Match:
                 except Exception as error:
                     problems.append(f"ring {number} {attr}={value!r}: {error}")
         self.plan = plan
+        for values in [(plan or {}).get("all") or {}] + list(((plan or {}).get("rings") or {}).values()):
+            self.touched |= set(values)
         return problems
 
     # --- a week --------------------------------------------------------------------------------------------------
 
     def play_week(self):
+        """Play a week. Four runs advance from the week's start:
+
+        - candidate: the defender's policy against the attacker's plan (what happens);
+        - no-defense counterfactual: the bank's built-in rules against the same attacker plan;
+        - no-attack counterfactual: the defender's policy against the scripted crews (no attacker plan);
+        - reference: built-in rules against scripted crews, for context only.
+
+        The defender is scored on what its policy saved against this week's attack (candidate vs no-defense), the
+        attacker on what its plan took beyond the scripted crews against this week's defense (candidate vs
+        no-attack). Each side is then judged on its own choices, not on the other side's.
+        """
         start_day = self.warmup_days + self.week * self.week_days
         end_day = start_day + self.week_days
         start = iso(self.cand.time)
         self.runtime_error = None
-        trial = self.cand.fork()
+        week_start = self.cand
+        trial = week_start.fork()
         if self.grayson:
             self.grayson.new_week()
         trial.set_outside(self._outside)
@@ -189,12 +228,25 @@ class Match:
             self.cand = trial
         except Exception as error:
             # The defender's rules stopped the run (e.g. ordering a `none` feature): keep the previous policy and
-            # play the week from the untouched candidate state.
+            # play the week from the untouched week-start state.
             self.runtime_error = f"{type(error).__name__}: {error}"
             self.week_cases = []
-            self._apply(self.cand, self.previous)
+            self._apply(week_start, self.previous)
             self.deployed = self.previous
-            self.cand.run_until_day(end_day)
+            trial = week_start.fork()
+            trial.set_outside(self._outside)
+            trial.run_until_day(end_day)
+            self.cand = trial
+        # No-defense counterfactual: the same week-start state with the built-in rules.
+        no_def = week_start.fork()
+        no_def.undeploy(ROLE)
+        no_def.set_outside(None)
+        no_def.run_until_day(end_day)
+        # No-attack counterfactual: the same week-start state with the defender's policy and the scripted crews.
+        no_att = week_start.fork()
+        no_att.set_outside(self._quiet_outside(self.deployed))
+        self._script_plan(no_att)
+        no_att.run_until_day(end_day)
         self.ref.run_until_day(end_day)
         end = iso(self.cand.time)
         self.week += 1
@@ -202,36 +254,41 @@ class Match:
         cand_truth, owners = self._export(self.cand, wdir / "candidate")
         self.all_cases += self.week_cases
         self.last_truth = cand_truth
-        ref_truth, _ = self._export(self.ref, wdir / "reference")
-        d_c = scoring.window_score(cand_truth, owners, institution=INSTITUTION, role=ROLE, start=start, end=end,
-                                   weights=WEIGHTS)
-        d_r = scoring.window_score(ref_truth, owners, institution=INSTITUTION, role=ROLE, start=start, end=end,
-                                   weights=WEIGHTS)
-        defender = scoring.paired(d_c, d_r, WEIGHTS)
-        observed = list(INSTITUTIONS)
-        att = {"candidate": 0.0, "reference": 0.0, "by_ring": {}}
+        truths = {"no_defense": self._export(no_def, wdir / "no_defense")[0],
+                  "no_attack": self._export(no_att, wdir / "no_attack")[0],
+                  "reference": self._export(self.ref, wdir / "reference")[0]}
+        bank = lambda t: scoring.window_score(t, owners, institution=INSTITUTION, role=ROLE, start=start, end=end,  # noqa: E731
+                                              weights=WEIGHTS)
+        d_c, d_nd, d_na, d_r = bank(cand_truth), bank(truths["no_defense"]), bank(truths["no_attack"]), \
+            bank(truths["reference"])
+        defender = scoring.paired(d_c, d_nd, WEIGHTS)
+        vs_reference = scoring.paired(d_c, d_r, WEIGHTS)
+
+        def at_bank(x):  # what a ring takes from the defended bank: losses + mule flow at its weight
+            b = x["by_institution"].get(INSTITUTION, {"losses": 0.0, "mule_flow": 0.0})
+            return b["losses"] + WEIGHTS.mule_flow * b["mule_flow"]
+
+        takes = {"candidate": 0.0, "no_attack": 0.0, "no_defense": 0.0, "reference": 0.0}
+        by_ring, all_inst = {}, {"candidate": 0.0, "no_attack": 0.0}
         for number, ring in self.rings.items():
-            c = scoring.ring_score(cand_truth, owners, ring=ring, number=number, institutions=observed, start=start,
-                                   end=end, weights=WEIGHTS)
-            r = scoring.ring_score(ref_truth, owners, ring=ring, number=number, institutions=observed, start=start,
-                                   end=end, weights=WEIGHTS)
-            # Ranked: what the syndicate takes from the defended bank only (losses + mule flow at its weight).
-            def at_bank(x):
-                b = x["by_institution"].get(INSTITUTION, {"losses": 0.0, "mule_flow": 0.0})
-                return b["losses"] + WEIGHTS.mule_flow * b["mule_flow"]
-            att["candidate"] += at_bank(c)
-            att["reference"] += at_bank(r)
-            att["all_institutions_candidate"] = att.get("all_institutions_candidate", 0.0) + c["score"]
-            att["all_institutions_reference"] = att.get("all_institutions_reference", 0.0) + r["score"]
-            att["by_ring"][number] = {"candidate": c, "reference": r}
+            per = {}
+            for name, t in (("candidate", cand_truth), *truths.items()):
+                per[name] = scoring.ring_score(t, owners, ring=ring, number=number, institutions=list(INSTITUTIONS),
+                                               start=start, end=end, weights=WEIGHTS)
+                takes[name] += at_bank(per[name])
+            all_inst["candidate"] += per["candidate"]["score"]
+            all_inst["no_attack"] += per["no_attack"]["score"]
+            by_ring[number] = {"candidate": per["candidate"], "no_attack": per["no_attack"]}
         result = {
             "week": self.week, "start": start, "end": end,
             "defender": {"score": defender.composite, "prevented": defender.losses_prevented,
                          "added_friction": defender.added_friction, "candidate": d_c.as_dict(),
-                         "reference": d_r.as_dict()},
-            "attacker": {"score": att["candidate"] - att["reference"], "candidate": att["candidate"],
-                         "reference": att["reference"], "by_ring": att["by_ring"],
-                         "all_institutions_score": att["all_institutions_candidate"] - att["all_institutions_reference"]},
+                         "no_defense": d_nd.as_dict(), "no_attack": d_na.as_dict(), "reference": d_r.as_dict(),
+                         "vs_reference": vs_reference.composite},
+            "attacker": {"score": takes["candidate"] - takes["no_attack"], "candidate": takes["candidate"],
+                         "no_attack": takes["no_attack"], "no_defense": takes["no_defense"],
+                         "reference": takes["reference"], "by_ring": by_ring,
+                         "all_institutions_score": all_inst["candidate"] - all_inst["no_attack"]},
         }
         return result, cand_truth, owners
 
@@ -288,7 +345,9 @@ class Match:
     def _write_cases(self, data):
         """One table per decision of the cases the bank decided during the match: observed features, identifiers,
         the action taken, and `fraud_known`: true only for fraud the bank has discovered by now (truth's discovery
-        time), as a fraud team's labels are. Undiscovered fraud reads false, as it would at a bank."""
+        time), as a fraud team's labels are, or reported by its victim: REPORT_SHARE of fraud cases are reported
+        REPORT_DAYS after the fraud became knowable (a dispute, a chargeback, a customer's call). Undiscovered,
+        unreported fraud reads false, as it would at a bank."""
         if not self.all_cases or self.last_truth is None:
             return
         import pyarrow as pa
@@ -300,8 +359,11 @@ class Match:
             SELECT DISTINCT d.decision, epoch_ms(d.time) FROM '{T}/decisions.parquet' d
             JOIN '{T}/events.parquet' e ON e.key = d.key
             JOIN '{T}/labels.parquet' l ON l.cause_instance = e.cause_instance
-            WHERE d.role = '{ROLE}' AND e.cause_label = 'fraud' AND l.discovered_at IS NOT NULL
-              AND l.discovered_at <= TIMESTAMPTZ '{now}'""").fetchall()}
+            WHERE d.role = '{ROLE}' AND e.cause_label = 'fraud' AND (
+              (l.discovered_at IS NOT NULL AND l.discovered_at <= TIMESTAMPTZ '{now}')
+              OR (l.knowable_at IS NOT NULL AND hash(e.cause_instance || ':reported') % 1000 < {int(REPORT_SHARE * 1000)}
+                  AND l.knowable_at + to_days(CAST({REPORT_DAYS[0]} + hash(e.cause_instance || ':delay')
+                      % {REPORT_DAYS[1] - REPORT_DAYS[0] + 1} AS INTEGER)) <= TIMESTAMPTZ '{now}'))""").fetchall()}
         actions = {(d, t): a for d, t, a in duckdb.sql(
             f"SELECT decision, epoch_ms(time), action FROM '{T}/decisions.parquet' WHERE role = '{ROLE}'").fetchall()}
         by_decision = {}

@@ -31,14 +31,16 @@ You control the bank's automated decisions: card authorizations, logins, account
 policy help`). Each week you may deploy a new policy: rules (and optional scoring models) that the bank applies to
 every decision of that kind. Decisions you write no rules for keep the bank's built-in rules.
 
-Scoring, per week, against a reference run of the same world with the bank's built-in rules and the ring's usual
-behaviour: fraud losses you prevent at Brindlemark, minus the extra friction you cause good customers (declines cost
-$3 + 10% of the amount, step-ups $0.50, holds $2, reviews $15, alerts $8, blocks $25, account closures $200).
+Scoring, per week: the same week is replayed with the bank's built-in rules against the very same attack. Your score
+is the fraud losses your policy prevented at Brindlemark compared with that replay, minus the extra friction you cause
+good customers (declines cost $3 + 10% of the amount, step-ups $0.50, holds $2, reviews $15, alerts $8, blocks $25,
+account closures $200). A harder attack doesn't lower your score by itself; only what your policy does counts.
 
 Your data: the bank's own tables (`arena tables`, `arena query`): customers, accounts, card authorizations, logins,
 transfers, applications, disputes, alerts and more, as the bank sees them; and cases_<decision> tables with every
 decision the bank made (its observed features, including payment memos and notes, the action taken, and fraud_known:
-fraud the bank has discovered so far, late and incomplete as at a real bank). The bank has about a month of history
+fraud the bank has discovered or its victim has reported so far: most victims report within days, some never do, so
+recent fraud is often still unlabeled). The bank has about a month of history
 before the match. You never see the ring's plans.
 
 Your tools: `arena rule add/remove/list` for quick rule changes, `arena fit logistic|trees` to train a scoring model on
@@ -57,9 +59,10 @@ Each week you set the ring's plan (`arena policy help`): how much each crew work
 attacks, timing, devices, proxy exits, identities and mule recruiting. In the plan, "rings" means your crews. At the
 start, every crew aims at Brindlemark wherever its schemes allow (plan_where "planned", plan_share_brindlemark 1).
 
-Another AI defends Brindlemark Bank and adapts its rules each week. Scoring, per week, against a reference run of the
-same world where your crews keep their usual habits: what the ring takes from BRINDLEMARK (mule pass-through counts at
-10%), minus what it would have taken there anyway. Money taken elsewhere doesn't score. You work within an effort budget
+Another AI defends Brindlemark Bank and adapts its rules each week. Scoring, per week: the same week is replayed with
+your crews on their usual habits against the very same defense. Your score is what the ring takes from BRINDLEMARK
+(mule pass-through counts at 10%) beyond that replay. A tougher defense doesn't lower your score by itself; only what
+your plan does counts. Money taken elsewhere doesn't score. You work within an effort budget
 (see `arena policy help`): pushing some crews or schemes harder means easing off others.
 
 Your data: your own results only (`arena results`): what each crew took from each institution each week, and how many
@@ -75,6 +78,16 @@ It is your turn before week {week} of {weeks}. You have about {max_turns} comman
 reports problems. `arena policy show` prints the policy now in force, to start from.
 Keep short notes for next week with `arena note "..."`. Only `arena` commands work here.
 When your policy is saved, stop and reply with one line summarizing what you changed and why."""
+
+GRAYSON_NOTE = """
+## Grayson (enabled in this match)
+Grayson is a model that reads a case the way an analyst would, including its free text (payment memos, notes, payee
+names, application fields), and answers a multiple-choice question about it with probabilities. It needs no labels,
+so it helps most where your fraud_known labels are thin. Much of the ring's scam traffic shows up only in text that
+numeric rules can't read. Try it on past cases with `arena grayson` (e.g. ask whether a payment memo looks like a scam
+payment, then compare the answers with fraud_known), then add a `grayson` section to your policy so it answers live on
+the decisions you choose; your rules then read `outside.<question>.<option>` (see `arena policy help`).
+"""
 
 
 def write_wrapper(bin_dir, work, key_file=None):
@@ -140,6 +153,8 @@ def main():
         work = out / role
         work.mkdir()
         (work / "role").write_text(role)
+        if role == "defender" and args.grayson:
+            BRIEFS["defender"] += GRAYSON_NOTE
         (work / "brief.md").write_text(BRIEFS[role])
         (work / "notes.md").write_text("")
         (work / "data").mkdir()
@@ -169,8 +184,16 @@ def main():
         (works["attacker"] / "data" / "results.json").write_text(json.dumps(att_view, indent=1))
         for role, work in works.items():
             lines = [f"# Week {wk + 1} of {args.weeks} is next.", ""]
-            for i, s in enumerate(scores[role], 1):
-                lines.append(f"week {i}: score {s:+.0f}")
+            for i, (s, w) in enumerate(zip(scores[role], weeks), 1):
+                if role == "defender":
+                    d = w["defender"]
+                    lines.append(f"week {i}: score {s:+.0f} (losses prevented {d['prevented']:+.0f}, added friction "
+                                 f"{d['added_friction']:+.0f}; fraud losses at the bank {d['candidate']['losses']:.0f} vs "
+                                 f"{d['no_defense']['losses']:.0f} with the built-in rules)")
+                else:
+                    a = w["attacker"]
+                    lines.append(f"week {i}: score {s:+.0f} (took {a['candidate']:.0f} at Brindlemark; your crews on their "
+                                 f"usual habits would have taken {a['no_attack']:.0f} against the same defense)")
             if not scores[role]:
                 lines.append("No weeks played yet: the data covers the bank's history before the match." if role == "defender"
                              else "No weeks played yet: you have no results. Set an opening plan.")
@@ -214,6 +237,8 @@ def main():
                       "plan_problems": plan_problems,
                       "policies": {r: json.loads((w / "policy.json").read_text()) for r, w in works.items()}})
         print(f"week {wk + 1}: defender {res['defender']['score']:+.0f}  attacker {res['attacker']['score']:+.0f}  "
+              f"[bank losses cand {res['defender']['candidate']['losses']:.0f} no-def {res['defender']['no_defense']['losses']:.0f} "
+              f"no-att {res['defender']['no_attack']['losses']:.0f} ref {res['defender']['reference']['losses']:.0f}]  "
               + "  ".join(f"{r}: {t.get('turns')} turns {t.get('seconds')}s" for r, t in turns.items() if not t.get("skipped"))
               + (f"  DEPLOY ERROR: {deploy_error[:120]}" if deploy_error else ""), flush=True)
 
