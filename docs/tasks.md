@@ -173,3 +173,13 @@ Every command is appended to the workspace's `log.jsonl` (args, ok/error, second
   application and KYC check); they are kept: real queues have them too.
 - Monitor-seeded incidents (victims of one crew) are scored only on members that fired the same monitor.
 - Truth roles are rule-derived from event actors and account control; witting vs unwitting mules are not separated.
+
+## Pilot (seed 11, 8000 roots, 120 days)
+
+40 alert cases (45% fraud: ato 3, card_compromise 3, first_party 3, scam_victim 3, promo_abuse 3,
+synthetic_identity 2, other 1, none 22) and 12 incidents (R1 promo farm x3, R6 card testing x2, R2 vishing device
+pool, R5 synthetic bust-out, R10 refund-service customers, R7 ACH-pull victims; benign: an employer's payroll, a
+subscription merchant, a consumer VPN exit). Heuristic baseline on all cases: alert accuracy 0.63, fraud F1 0.60,
+Brier 0.22; incident verdict accuracy 0.67, member F1 0.33. Sonnet on 12 alerts / 6 incidents (about $3 for two
+prompt versions): alert accuracy 0.58-0.67, fraud F1 0.67-0.75; incident verdict 0.50-0.67, member F1 0-0.20. It
+used only 2-14 commands per case. These are smoke-test numbers from one seed.
