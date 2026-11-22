@@ -1,7 +1,8 @@
-# Fraud Arena investigation-tasks variant of runmere worlds/fraud-world/world.yaml. Identical to
-# worlds/fraud-world-arena.yaml except fraud_density is back to the world's default 0.62, so independent fraudsters
-# (not only the ten rings' crews) appear. ring_volume's max stays 16 as in the arena copy (only matters for
-# interventions, which the tasks don't use).
+# Fraud Arena investigation-tasks variant of runmere worlds/fraud-world/world.yaml. Differs from
+# worlds/fraud-world-arena.yaml in two places: fraud_density is back to the world's default 0.62, so independent
+# fraudsters (not only the ten rings' crews) appear; and ring R1's scheme (r1_bank_hopping) is a direct-deposit
+# sign-up bonus churn with rotating employers and an ACH cash-out (see its comment). ring_volume's max stays 16 as in
+# the arena copy (only matters for interventions, which the tasks don't use).
 runmere: "0.2"
 id: fraud-world
 description: >-
@@ -23660,13 +23661,14 @@ world:
               - {to: done, after: 1m}
           done: {terminal: true}
 
-    # Ring R1 (DESIGN.md §5.8, §6.7 A, LM5): bank-hopping promo abuse and deposit fraud. Each instance is one
-    # identity from the ring's suppliers (a stolen copy from a breach, or a synthetic one) that an account opener
-    # takes through the scheme: a checking account at the institution the ring now favours (Brindlemark for its
-    # bonus, Arbelton once Brindlemark's review closes too many), fake payroll deposits for the bonus, referrals
-    # among the ring's own accounts, a deposit-fraud wave for some, accounts at Dovrex and Everhollow in the same
-    # identity for their referral bonuses, coins out to the ring's address, and the seed money out before the bank
-    # catches up. Openers apply in bursts from the ring's farm phones over proxies in the identity's region.
+    # Ring R1 (DESIGN.md §5.8, §6.7 A, LM5): direct-deposit sign-up bonus churning. (Tasks variant: in this file the
+    # scheme differs from the arena world's: no deposit-fraud wave, occasional referrals, rotating employers, ACH
+    # cash-out right after the bonus.) Each instance is one identity from the ring's suppliers (a stolen copy from a
+    # breach, or a synthetic one) that an account opener takes through the scheme: a checking account at the
+    # institution the ring now favours, two or three biweekly "paychecks" from one of the crew's fake employers for
+    # the direct-deposit bonus, then the balance out by ACH to the crew's collection accounts at Dovrex or a prepaid
+    # card within days of the bonus; some identities also open Dovrex and Everhollow accounts. Openers apply in
+    # bursts from the ring's farm phones over proxies in the identity's region, with their own email addresses.
     r1_bank_hopping:
       family: bank_hopping
       label: fraud
@@ -23752,7 +23754,7 @@ world:
                     - create:
                         entity: email_address
                         as: em
-                        attributes: {operator: fraudster, ring: ring, kind: "'pattern_generated'", given: v.given, family: v.family, years_old: "inc.aged_years if fraudster.opsec >= 0.25 else 0.02"}
+                        attributes: {operator: fraudster, kind: "'pattern_generated'", given: v.given, family: v.family, holder_age: v.age, years_old: "inc.aged_years if fraudster.opsec >= 0.25 else 0.02"}
                     - create:
                         entity: identity
                         as: copy
@@ -23781,7 +23783,7 @@ world:
                     - create:
                         entity: email_address
                         as: em2
-                        attributes: {operator: fraudster, ring: ring, kind: "'pattern_generated'", years_old: "inc.aged_years if fraudster.opsec >= 0.25 else 0.02"}
+                        attributes: {operator: fraudster, kind: "'pattern_generated'", holder_age: "22 + inc.planned * 4", years_old: "inc.aged_years if fraudster.opsec >= 0.25 else 0.02"}
                     - create:
                         entity: identity
                         as: synth
@@ -23805,8 +23807,9 @@ world:
                     product: "'checking'"
                     channel: "'app'"
                     purpose: "'new_customer'"
-                    referrer: "crook if count(crook.accounts, where=it.institution == bank and it.status == 'open' and it.type == 'checking') > 0 else none"
-                    referrer_identity: "first(crook.accounts, where=it.institution == bank and it.status == 'open' and it.type == 'checking').identity if count(crook.accounts, where=it.institution == bank and it.status == 'open' and it.type == 'checking') > 0 else none"
+                    # The bonus that matters is the direct-deposit one; an opener only sometimes adds a referral.
+                    referrer: "crook if inc.contact_roll < 0.12 and count(crook.accounts, where=it.institution == bank and it.status == 'open' and it.type == 'checking') > 0 else none"
+                    referrer_identity: "first(crook.accounts, where=it.institution == bank and it.status == 'open' and it.type == 'checking').identity if inc.contact_roll < 0.12 and count(crook.accounts, where=it.institution == bank and it.status == 'open' and it.type == 'checking') > 0 else none"
                     stated_income: {dist: lognormal, params: {mu: "ln(46000)", sigma: 0.35}, round: -3}
                     device: device
                     ip: &slip_inc_ip {pick: "[inc.exit, coalesce(first(fraudster.home_ips), first(fraudster.selves).home_ip)]", where: "it != none", weight: "fraudster.slip_rate if it != inc.exit else 1.0 - fraudster.slip_rate"}
@@ -23830,8 +23833,7 @@ world:
               - {to: stopped, when: "inc.account == none"}
               - {to: seed, after: 1m}
           seed:
-            # Ring accounts at a background bank send "PAYROLL" credits just over the bonus threshold; at Arbelton,
-            # which pays no bonus, the seed money comes as transfers.
+            # At Arbelton, which pays no bonus, the same credits come as transfers.
             enter:
               - set: {inc.result: "'succeeded'", inc.account.opened_by: fraudster, inc.account.controlled_by: fraudster}
               - if:
@@ -23865,38 +23867,68 @@ world:
                         actor: fraudster
                         after: {h: {p50: 3, p95: 30}}
                         fields: {person: crook, identity: inc.identity, institution: inc.institution, device: device, ip: *slip_inc_ip, channel: "'app'", auth: {shares: {password: 0.7, saved_session: 0.3}}, credential_ok: "true"}
+              # Two or three biweekly "paychecks" from one of the crew's fake employers (several, rotated across
+              # openers; some borrow a real small employer's name), varied amounts in cents, the first one to three
+              # weeks after opening: enough direct deposit for the sign-up bonus.
+              - emit:
+                  event: ach_credit
+                  actor: crook
+                  after: {d: {p50: 12, p95: 21}}
+                  fields: &r1_seed_credit
+                    account: inc.account
+                    amount: {dist: lognormal, params: {mu: "ln(430 + 95 * inc.planned)", sigma: 0.05}, clip: ["params.signup_bonus_dd_required / 2", 2500], round: 2}
+                    cp_name: >-
+                      'NORTHGATE STAFFING' if inc.email_roll < 0.17 else ('BRAYLOW LABOR SERVICES' if inc.email_roll < 0.33
+                      else ('KINWELL TEMPS' if inc.email_roll < 0.48 else ('ARLO WORKFORCE GROUP' if inc.email_roll < 0.62
+                      else ('REDFERN PAYROLL SVCS' if inc.email_roll < 0.75 else ('LAKESIDE SERVICES' if inc.email_roll < 0.84
+                      else ('PRAIRIE SERVICES' if inc.email_roll < 0.92 else 'HARBOR SERVICES'))))))
+                    cp_routing: {shares: {"107644304": 0.35, "022783887": 0.25, "016853655": 0.2, "053864393": 0.2}}
+                    entry_desc: "'PAYROLL' if bank == institution('brindlemark') else 'TRANSFER'"
+                    sec_code: "'PPD'"
+                    in_world_payroll: "false"
+                    own_funds: "true"
+              - emit:
+                  event: ach_credit
+                  actor: crook
+                  after: {d: {p50: 26, p95: 35}}
+                  fields: *r1_seed_credit
               - chance:
-                  probability: 0.7
+                  probability: 0.5
                   then:
                     - emit:
                         event: ach_credit
                         actor: crook
-                        after: {d: {p50: 4, p95: 10}}
-                        fields: &r1_seed_credit
-                          account: inc.account
-                          amount: {dist: lognormal, params: {mu: "ln(650) if bank == institution('brindlemark') else ln(700)", sigma: 0.45}, clip: ["params.signup_bonus_dd_required / 2", 2500], round: 2}
-                          cp_name: "'WESTLINE STAFFING' if ring.email_style == 'dotted' else 'PAYROLL SVC A'"
-                          cp_routing: {shares: {"107644304": 0.35, "022783887": 0.25, "016853655": 0.2, "053864393": 0.2}}
-                          entry_desc: "'PAYROLL' if bank == institution('brindlemark') else 'TRANSFER'"
-                          sec_code: "'PPD'"
-                          in_world_payroll: "false"
-                          own_funds: "true"
-                    - emit:
-                        event: ach_credit
-                        actor: crook
-                        after: {d: {p50: 18, p95: 25}}
+                        after: {d: {p50: 40, p95: 49}}
                         fields: *r1_seed_credit
             transitions:
-              - {to: hop, after: {d: {p50: 36, p95: 50}}}
+              - {to: hop, when: "inc.account.bonus_state == 'paid'"}
+              - {to: hop, after: {d: {p50: 62, p95: 75}}}
           hop:
-            # The bonus has paid out. A third of the accounts run a deposit-fraud wave; the rest of the money moves on
-            # to Dovrex and Everhollow accounts in the same identity, which collect their own referral bonuses.
+            # The bonus has paid out (or the deadline passed): the balance goes to the crew at once; some identities
+            # also open Dovrex and Everhollow accounts, which collect their own bonuses.
             enter:
               - set: {inc.steps_done: "inc.steps_done + 1"}
               - if:
                   when: "inc.account.bonus_state == 'paid'"
                   then:
                     - label: {name: promo_abuse, subject: inc.account, knowable_after: {d: {p50: 5, p95: 30}}}
+              - if:
+                  when: "inc.account.status == 'open' and not inc.account.restricted and inc.account.balance > 100"
+                  then:
+                    # The bonus is in: one to five days later the balance goes by ACH to one of the crew's few
+                    # collection accounts at Dovrex, or to one of its prepaid card accounts.
+                    - emit:
+                        event: ach_transfer_out
+                        actor: fraudster
+                        after: {d: {p50: 2, p95: 5}}
+                        fields:
+                          account: inc.account
+                          amount: "max(20, round(0.93 * inc.account.balance, 2))"
+                          cp_name: "'DOVREX' if inc.listing_no % 5 < 3 else 'CARDWELL PREPAID'"
+                          cp_routing: "institution('dovrex').routing if inc.listing_no % 5 < 3 else '091408501'"
+                          cp_account: "'7730019912' if inc.listing_no % 5 == 0 else ('7730024407' if inc.listing_no % 5 == 1 else ('7730031165' if inc.listing_no % 5 == 2 else ('5160443308' if inc.listing_no % 5 == 3 else '5160471192')))"
+                          entry_desc: "'TRANSFER'"
+                          sec_code: "'WEB'"
               - chance:
                   probability: "ring.leak_rate"
                   then:
@@ -23911,7 +23943,7 @@ world:
                         actor: fraudster
                         fields: {person: crook, identity: inc.identity, institution: inc.institution, device: device, ip: *slip_inc_ip, channel: "'app'", auth: {shares: {password: 0.7, saved_session: 0.3}}, credential_ok: "true"}
               - chance:
-                  probability: "0.33 if inc.account.status == 'open' and not inc.account.restricted else 0.0"
+                  probability: "0.0"
                   then:
                     - set: {inc.pending: "1"}
                     - label:

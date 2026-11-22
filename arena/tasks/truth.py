@@ -66,7 +66,7 @@ class Truth:
 
     def _involvements(self):
         rows = self.db.execute("""
-            SELECT CUST_ID, sc, inst, tbl, ev, actor_type, time, load_time, rn FROM rows
+            SELECT CUST_ID, sc, inst, tbl, ev, actor_type, time, load_time, rn, actor FROM rows
             WHERE sc IS NOT NULL AND (lab = 'fraud' OR sc IN ('ring_cover_activity', 'ring_operation'))
             ORDER BY time, tbl, rn""").fetchall()
         groups = defaultdict(list)
@@ -107,7 +107,8 @@ class Truth:
                         "first_load": min(r[7] for r in rs if r[7] is not None),
                         "n_rows": len(rs), "tables": sorted({r[3] for r in rs}),
                         "events": sorted({e for e, _ in evs}),
-                        "fraudster_acted": any(a == "fraudster" for _, a in evs)})
+                        "fraudster_acted": any(a == "fraudster" for _, a in evs),
+                        "fraudster": next((r[9] for r in rs if r[5] == "fraudster"), None)})
         return out
 
     def _ring_at(self, cust, ts):

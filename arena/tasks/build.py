@@ -31,7 +31,12 @@ from .truth import Truth
 
 ALERT_DELAY = timedelta(hours=24)      # the analyst works the alert a day after it fired
 MAX_KEY_SIZE = 40                      # keys shared by more customers than this are too coarse to seed or expand on
-REACH_KEY_SIZE = 25                    # answerability: members must be reachable from the seed over keys this rare
+RARE_KEY_SIZE = 12                     # findability: beyond the anomaly's own key, members must be linked by keys this rare
+MAX_HOPS = 3
+WAVE_SPANS = [21, 28, 42]              # days; drawn per group and seed, so case windows and sizes vary across seeds
+WAVES_PER_GROUP = 1                    # cases per truth group per seed
+MAX_CASE_MEMBERS = 12                  # a wave holds at most this many members (bigger crews give shorter windows)
+ATTEMPTS = 4                           # draws of case time / seed per wave (make_incident)
 REACH_KINDS = ["device", "ip", "phone", "email", "address", "ach_originator", "payee", "merchant", "referral",
                "p2p_sender"]
 SEED_KINDS = ["device", "ip", "merchant", "payee", "ach_originator", "referral", "address", "p2p_sender"]
@@ -48,6 +53,15 @@ KIND_TEXT = {
     "phone": "share the phone number {k}",
     "email": "share the email {k}",
 }
+
+
+def scheme_id(r):
+    """The scheme part of a template id: a ring crew's typology, an independent fraudster's scenario, or benign."""
+    if r is None:
+        return "benign"
+    if r.get("ring"):
+        return f"{r['ring']}-{r['typology']}"
+    return f"indep-{r.get('scenario') or r['typology']}"
 
 
 def iso(ts):
@@ -153,46 +167,32 @@ def truth_groups(truth):
         if r["ring"]:
             key = ("ring", r["ring"], r["typology"])
         else:
-            key = ("independent", r["scenario"], anchors.get(r["instance"]))
+            # one fraudster's run: the fraudster who acted in the involvement, else the instance's anchor
+            fr = next((i.get("fraudster") for i in invs if i.get("fraudster") and i["scenario"] == r["scenario"]), None)
+            key = ("independent", r["scenario"], fr or anchors.get(r["instance"]))
         groups[key].append({"cust": cust, "truth": r, "start": start, "first_load": first_load})
     return groups
 
 
-def waves(members, max_span=timedelta(days=35), min_size=4, single_if_at_most=12):
+def waves(members, max_span=timedelta(days=35), min_size=4, single_if_at_most=MAX_CASE_MEMBERS):
     members = sorted(members, key=lambda m: m["start"])
     if len(members) <= single_if_at_most:
         return [members]
     out, i = [], 0
     while i < len(members):
         s = members[i]["start"]
-        w = [m for m in members[i:] if m["start"] <= s + max_span]
+        w = [m for m in members[i:] if m["start"] <= s + max_span][:MAX_CASE_MEMBERS]
         if len(w) >= min_size:
             out.append(w)
         i += len(w)
     return out
 
 
-def best_seed_key(db, members, kinds=SEED_KINDS, exclude=()):
-    """The bank-visible key held by the most members (ties: the most exclusive), among keys no coarser than
-    MAX_KEY_SIZE. Returns (kind, key, holders among members, key size) or None."""
-    ids = [m["cust"] for m in members]
-    rows = db.execute(f"""SELECT c.kind, c.k, count(DISTINCT c.CUST_ID) hits, any_value(s.customers) size
-                          FROM custkeys c JOIN keysize s USING (kind, k)
-                          WHERE c.CUST_ID IN (SELECT unnest(?)) AND s.customers <= {MAX_KEY_SIZE}
-                            AND c.kind IN (SELECT unnest(?))
-                          GROUP BY ALL HAVING count(DISTINCT c.CUST_ID) >= 2
-                          ORDER BY hits DESC, size ASC, c.kind, c.k""", [ids, list(kinds)]).fetchall()
-    for kind, k, hits, size in rows:
-        if (kind, k) not in exclude:
-            holders = [r[0] for r in db.execute("""SELECT CUST_ID FROM custkeys WHERE kind = ? AND k = ?
-                                                   AND CUST_ID IN (SELECT unnest(?)) ORDER BY first_ts, CUST_ID""",
-                                                [kind, k, ids]).fetchall()]
-            return kind, k, holders, size
-    return None
-
-
-def reachable(db, seed, max_hops=3, max_size=REACH_KEY_SIZE):
-    """Customers reachable from the seed over shared keys no coarser than max_size, with hop counts."""
+def findable(db, seed, member_ids, seed_key, max_hops=MAX_HOPS, rare=RARE_KEY_SIZE):
+    """Members reachable from the seed with `casefile links`: over the anomaly's own key (whatever its size), or over
+    keys shared by at most `rare` customers, expanding only through members (an investigator follows the customers
+    that turn out to be involved, not every holder of a key). Returns {member: hops}."""
+    members = set(member_ids)
     hops = {c: 0 for c in seed}
     frontier = set(seed)
     for h in range(1, max_hops + 1):
@@ -200,16 +200,38 @@ def reachable(db, seed, max_hops=3, max_size=REACH_KEY_SIZE):
             break
         rows = db.execute(f"""SELECT DISTINCT b.CUST_ID FROM custkeys a JOIN keysize s USING (kind, k)
                               JOIN custkeys b ON b.kind = a.kind AND b.k = a.k
-                              WHERE a.CUST_ID IN (SELECT unnest(?)) AND s.customers <= {max_size}
-                                AND a.kind IN (SELECT unnest(?))""", [sorted(frontier), REACH_KINDS]).fetchall()
-        new = {r[0] for r in rows} - set(hops)
+                              WHERE a.CUST_ID IN (SELECT unnest(?)) AND a.kind IN (SELECT unnest(?))
+                                AND (s.customers <= {rare} OR (a.kind = ? AND a.k = ?))""",
+                          [sorted(frontier), REACH_KINDS, seed_key[0], seed_key[1]]).fetchall()
+        new = ({r[0] for r in rows} & members) - set(hops)
         for c in new:
             hops[c] = h
         frontier = new
     return hops
 
 
-def pattern_seed(members, alerts, start, T):
+def seed_candidates(db, members, kinds=SEED_KINDS):
+    """Per key kind, the key held by the most members (ties: the most exclusive) among keys no coarser than
+    MAX_KEY_SIZE and held by 2+ members: {kind: (key, holders among members, key size)}."""
+    ids = [m["cust"] for m in members]
+    rows = db.execute(f"""SELECT c.kind, c.k, count(DISTINCT c.CUST_ID) hits, any_value(s.customers) size
+                          FROM custkeys c JOIN keysize s USING (kind, k)
+                          WHERE c.CUST_ID IN (SELECT unnest(?)) AND s.customers <= {MAX_KEY_SIZE}
+                            AND c.kind IN (SELECT unnest(?))
+                          GROUP BY ALL HAVING count(DISTINCT c.CUST_ID) >= 2
+                          ORDER BY hits DESC, size ASC, c.kind, c.k""", [ids, list(kinds)]).fetchall()
+    out = {}
+    for kind, k, hits, size in rows:
+        if kind in out:
+            continue
+        holders = [r[0] for r in db.execute("""SELECT CUST_ID FROM custkeys WHERE kind = ? AND k = ?
+                                               AND CUST_ID IN (SELECT unnest(?)) ORDER BY first_ts, CUST_ID""",
+                                            [kind, k, ids]).fetchall()]
+        out[kind] = (k, holders, size)
+    return out
+
+
+def pattern_seed(members, alerts, start, T, rng):
     """(seed, member customers that fired the monitor, monitor, all customers that fired it in the window) for the
     monitor that fired on the most members within [start, T], when at least 3 did."""
     ids = {m["cust"] for m in members}
@@ -227,61 +249,82 @@ def pattern_seed(members, alerts, start, T):
     if len(hits[mon]) < 3:
         return None
     order = sorted(hits[mon], key=lambda c: (first[(mon, c)], c))
-    seed = order[:max(2, min(4, len(order) // 3))]
+    seed = order[:min(seed_size(len(order), rng), max(2, len(order) - 1))]
     return seed, set(order), mon, len(allc[mon])
 
 
-def seed_size(n):
-    return max(2, min(6, math.ceil(0.35 * n)))
+def seed_size(n, rng):
+    """Seed sizes vary per case: 2 up to half the visible members (at most 5)."""
+    return rng.randint(2, max(2, min(5, math.ceil(0.5 * n))))
 
 
 def make_incident(out, group_key, members, truth, rng, alerts=None, group_all=()):
-    """One incident case from a wave of a truth group, or None when it can't be seeded or expanded answerably."""
+    """One incident case from a wave of a truth group, or None when it can't be seeded.
+
+    Shape varies per seed: the case time is when a drawn share (60-90%) of the wave's members has become visible plus
+    1-4 days; the seed key's kind is drawn uniformly among the kinds that link 2+ visible members (so the decisive key
+    differs between seeds of one scheme); the seed size is drawn (seed_size). The members to find are those `findable`
+    from the seed; when none are, a monitor spike seeds the case instead, and failing that the case is kept as a
+    verdict-only case (expansion: none)."""
     members = sorted(members, key=lambda m: m["first_load"])
     if len(members) < 3:
         return None
-    # case time: when most members have become visible, plus two days
-    k = max(2, math.ceil(0.8 * len(members)))
-    T = members[k - 1]["first_load"] + timedelta(days=2)
+    k = max(2, math.ceil(rng.uniform(0.6, 0.9) * len(members)))
+    T = members[k - 1]["first_load"] + timedelta(days=rng.randint(1, 4))
     window_start = min(m["start"] for m in members) - timedelta(days=1)
     visible = [m for m in members if m["first_load"] <= T]
     if len(visible) < 3:
         return None
+    ids = [m["cust"] for m in visible]
     db = open_asof(out / "bank", T, lock=False)
     build_keys(db)
-    best = best_seed_key(db, visible)
-    scored, anomaly = [], None
-    if best is not None:
-        kind, key, holders, size = best
-        seed = holders[:seed_size(len(visible))]
-        hops = reachable(db, seed)
-        scored = [m for m in visible if m["cust"] in hops and m["cust"] not in seed]
+    cands = seed_candidates(db, visible)
+    kinds = sorted(cands)
+    rng.shuffle(kinds)
+    best, fallback = None, None
+    for kind in kinds:
+        key, holders, size = cands[kind]
+        seed = holders[:min(seed_size(len(visible), rng), len(holders))]
+        hops = findable(db, seed, ids, (kind, key))
+        scored = [c for c in ids if c in hops and c not in seed]
+        option = (kind, key, size, seed, hops, scored)
+        fallback = fallback or option
+        if scored:
+            best = option
+            break
+    anomaly, expansion = None, "members"
+    if best is None and alerts is not None:
+        # no key leads to more members (typical of one crew's victims, who share nothing): seed on a monitor spike;
+        # the members that fired the same monitor in the window are the ones to find
+        pat = pattern_seed(visible, alerts, window_start, T, rng)
+        if pat is not None:
+            seed, hits, monitor, n_all = pat
+            hops = {c: (0 if c in seed else 1) for c in hits}
+            if set(hits) - set(seed):
+                anomaly = {"kind": "monitor", "key": monitor, "customers_with_key": n_all,
+                           "text": f"{len(seed)} customers fired the monitor '{monitor}' "
+                                   f"({MONITOR_DESCRIPTIONS[monitor]}) in the window, with similar activity "
+                                   f"(the monitor fired on {n_all} customers in the window)"}
+                kind, key = "monitor", monitor
+    if anomaly is None:
+        if best is None:
+            if fallback is None:
+                return None
+            best, expansion = fallback, "none"
+        kind, key, size, seed, hops, scored = best
         anomaly = {"kind": kind, "key": key, "customers_with_key": size,
                    "text": f"{len(seed)} customers " + KIND_TEXT[kind].format(k=key)
                            + f" (the bank has {size} customers with this {kind.replace('_', ' ')} so far)"}
-    if not scored and alerts is not None:
-        # no rare shared key (typical of victims of one crew): seed on a monitor spike instead; the members that
-        # fired the same monitor in the window are the answerable ones
-        pat = pattern_seed(visible, alerts, window_start, T)
-        if pat is None:
-            return None
-        seed, hits, monitor, n_all = pat
-        hops = {c: (0 if c in seed else 1) for c in hits}
-        scored = [m for m in visible if m["cust"] in hits and m["cust"] not in seed]
-        anomaly = {"kind": "monitor", "key": monitor, "customers_with_key": n_all,
-                   "text": f"{len(seed)} customers fired the monitor '{monitor}' "
-                           f"({MONITOR_DESCRIPTIONS[monitor]}) in the window, with similar activity "
-                           f"(the monitor fired on {n_all} customers in the window)"}
-        kind, key = "monitor", monitor
-    if not scored:
-        return None
     roles = {m["cust"]: m["truth"]["role"] for m in visible}
-    return {"case_time": T, "window_start": window_start, "seed": seed, "anomaly": anomaly,
+    template = (f"incident/{group_key[1]}-{group_key[2]}" if group_key[0] == "ring"
+                else f"incident/indep-{group_key[1]}")
+    return {"case_time": T, "window_start": window_start, "seed": seed, "anomaly": anomaly, "template": template,
             "key": {"is_incident": True, "group": list(group_key), "ring": group_key[1] if group_key[0] == "ring" else None,
-                    "typology": _group_typology(members),
+                    "typology": _group_typology(members), "expansion": expansion, "template": template,
                     "members": [{"cust_id": m["cust"], "role": roles[m["cust"]], "hops": hops.get(m["cust"]),
-                                 "scored": m["cust"] in hops,
+                                 "scored": m["cust"] in hops and expansion != "none",
                                  "seed": m["cust"] in seed} for m in visible],
+                    "unreachable": sum(1 for c in ids if c not in hops),
                     "not_yet_visible": [m["cust"] for m in members if m["cust"] not in roles],
                     # the same crew's customers outside this window: neither required nor counted as wrong
                     "same_group_other": sorted({m["cust"] for m in group_all} - set(roles)),
@@ -320,12 +363,13 @@ def fp_incidents(out, truth, times, rng, n):
                                                ORDER BY last_ts DESC, CUST_ID""", [kind, key, str(T)]).fetchall()]
         seed = holders[:min(len(holders), rng.randint(2, 4))]   # the same seed sizes as real incidents
         used_kinds[kind] += 1
-        found.append({"case_time": T, "window_start": T - timedelta(days=30), "seed": seed,
+        found.append({"case_time": T, "window_start": T - timedelta(days=rng.choice([21, 30, 45])), "seed": seed,
+                      "template": f"incident/benign-{kind}",
                       "anomaly": {"kind": kind, "key": key, "customers_with_key": size,
                                   "text": f"{len(seed)} customers " + KIND_TEXT[kind].format(k=key)
                                           + f" (the bank has {size} customers with this {kind.replace('_', ' ')} so far)"},
                       "key": {"is_incident": False, "group": ["benign", kind, key], "ring": None, "typology": "none",
-                              "members": [], "seed_key": [kind, key],
+                              "members": [], "seed_key": [kind, key], "template": f"incident/benign-{kind}",
                               "benign_holders": holders}})
         if len(found) >= n:
             break
@@ -345,7 +389,18 @@ def write_workspace(root, case_id, case, brief):
     return ws
 
 
-def build(out, *, n_alerts=40, n_incidents=12, n_fp=3, fraud_share=0.45, seed=0, log=print):
+def group_allowed(template, seed, set_seeds, cap):
+    """A truth group (template) yields cases in at most `cap` of a seed set's builds: the seeds ranked first by a hash
+    of (template, seed). The same rule for every template, so no scheme dominates a season."""
+    if not set_seeds or cap is None or len(set_seeds) <= cap:
+        return True
+    import hashlib
+    rank = sorted(set_seeds, key=lambda s: hashlib.sha256(f"{template}|{s}".encode()).hexdigest())
+    return seed in rank[:cap]
+
+
+def build(out, *, n_alerts=40, n_incidents=12, n_fp=3, fraud_share=0.45, seed=0, split="dev", set_seeds=(),
+          builds_per_group=None, log=print):
     from . import briefs
     out = Path(out)
     rng = random.Random(seed)
@@ -357,7 +412,7 @@ def build(out, *, n_alerts=40, n_incidents=12, n_fp=3, fraud_share=0.45, seed=0,
     for d in ("alert", "incident"):
         if (out / d).exists():
             shutil.rmtree(out / d)
-    index = {"alert": [], "incident": []}
+    index = {"split": split, "seed": seed, "alert": [], "incident": []}
 
     fraud, benign = alert_candidates(out, truth)
     log(f"  alert candidates: {len(fraud)} fraud, {len(benign)} benign")
@@ -365,40 +420,44 @@ def build(out, *, n_alerts=40, n_incidents=12, n_fp=3, fraud_share=0.45, seed=0,
     share = sum(1 for a in cases if a["truth"]) / max(len(cases), 1)
     for i, a in enumerate(cases, 1):
         cid = f"A{i:03d}"
+        template = f"alert/{a['monitor']}/{scheme_id(a['truth'])}"
         case = {"task": "alert", "case_id": cid, "case_time": iso(a["case_time"]), "bank": "../../bank",
                 "customer": a["cust"],
                 "alert": {"type": a["monitor"], "monitor": MONITOR_DESCRIPTIONS[a["monitor"]], "reason": a["reason"],
                           "time": iso(a["ts"]), "ref": a["ref"]},
                 "fraud_share": round(share, 2)}
         write_workspace(out / "alert", cid, case, briefs.alert_brief(case))
-        key = {"case_id": cid, "customer": a["cust"], "monitor": a["monitor"], **alert_key(a)}
+        key = {"case_id": cid, "customer": a["cust"], "monitor": a["monitor"], "template": template, **alert_key(a)}
         (keys_dir / f"{cid}.json").write_text(json.dumps(key, indent=1, default=str))
-        index["alert"].append({"case_id": cid, "monitor": a["monitor"]})
+        index["alert"].append({"case_id": cid, "monitor": a["monitor"], "template": template})
 
     groups = truth_groups(truth)
     alerts = run_monitors(out)
     incidents = []
     for gkey, members in sorted(groups.items(), key=lambda x: (-len(x[1]), str(x[0]))):
-        ws = waves(members)
+        tmpl = f"{gkey[1]}-{gkey[2]}" if gkey[0] == "ring" else f"indep-{gkey[1]}"
+        if gkey[0] == "ring" and not group_allowed(tmpl, seed, set_seeds, builds_per_group):
+            continue
+        ws = waves(members, max_span=timedelta(days=rng.choice(WAVE_SPANS)))
         rng.shuffle(ws)
         made = 0
-        for w in sorted(ws, key=lambda w: -len(w)):
-            if made >= 3:
+        for w in ws:
+            if made >= WAVES_PER_GROUP:
                 break
-            inc = make_incident(out, gkey, w, truth, rng, alerts, members)
+            # a few draws of the case time and seed; keep the first with members to find (e.g. a window in which a
+            # crew reused one handle or device across several of its customers), else a verdict-only case
+            inc = None
+            for _ in range(ATTEMPTS):
+                inc = make_incident(out, gkey, w, truth, rng, alerts, members) or inc
+                if inc and inc["key"]["expansion"] != "none":
+                    break
             if inc:
                 incidents.append(inc)
                 made += 1
     log(f"  true incidents available: {len(incidents)} from {len(groups)} groups")
-    incidents.sort(key=lambda x: (-len(x['key']['members']), str(x['key']['group'])))
-    # keep a spread: at most 3 per group
-    true_n = n_incidents - n_fp
-    per_group, picked = Counter(), []
-    for inc in incidents:
-        g = tuple(inc["key"]["group"][:2])
-        if per_group[g] < 3 and len(picked) < true_n:
-            picked.append(inc)
-            per_group[g] += 1
+    # prefer cases with members to find; spread over groups (WAVES_PER_GROUP each at most, already)
+    incidents.sort(key=lambda x: (x["key"]["expansion"] == "none", -len(x["key"]["members"]), str(x["key"]["group"])))
+    picked = incidents[:n_incidents - n_fp]
     times = [inc["case_time"] for inc in picked] or []
     rng.shuffle(times)
     fps = fp_incidents(out, truth, times, rng, n_fp)
@@ -411,7 +470,7 @@ def build(out, *, n_alerts=40, n_incidents=12, n_fp=3, fraud_share=0.45, seed=0,
         write_workspace(out / "incident", cid, case, briefs.incident_brief(case))
         key = {"case_id": cid, **inc["key"], "seed": inc["seed"]}
         (keys_dir / f"{cid}.json").write_text(json.dumps(key, indent=1, default=str))
-        index["incident"].append({"case_id": cid, "anomaly_kind": inc["anomaly"]["kind"]})
+        index["incident"].append({"case_id": cid, "anomaly_kind": inc["anomaly"]["kind"], "template": inc["template"]})
 
     summary = summarize(out)
     index["summary"] = summary
@@ -433,6 +492,7 @@ def summarize(out):
         "incident_cases": len(b),
         "incident_true": sum(k["is_incident"] for k in b),
         "incident_by_group": [f"{k['case_id']} {'/'.join(str(x) for x in k['group'][:3])} seed={len(k['seed'])} "
-                              f"members={len(k['members'])} scored={sum(m['scored'] and not m['seed'] for m in k['members'])} "
+                              f"members={len(k['members'])} to_find={sum(m['scored'] and not m['seed'] for m in k['members'])} "
+                              f"unreachable={k.get('unreachable', 0)} expansion={k.get('expansion', '-')} "
                               f"key={k['seed_key'][0]}" for k in b],
     }
