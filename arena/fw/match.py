@@ -62,7 +62,7 @@ def code_lists(world_path=WORLD):
 
 
 class Match:
-    def __init__(self, out, *, world=WORLD, seed=7, roots=1500, warmup_days=60, week_days=7):
+    def __init__(self, out, *, world=WORLD, seed=7, roots=1500, warmup_days=60, week_days=7, intensity=1.0):
         self.out = Path(out)
         self.world_path, self.seed, self.roots = Path(world), seed, roots
         self.week_days, self.warmup_days = week_days, warmup_days
@@ -84,6 +84,18 @@ class Match:
         self.ref = runmere.Run.restore(self.world, ckpt, roots)
         rings = self.cand.entities("ring", ["number"]).to_pylist()
         self.rings = {r["number"]: r["entity"] for r in rings}
+        # Match intensity: from the checkpoint on, every ring works at `intensity` times its usual volume in both
+        # runs, so the match has more fraud than the bank's history. The attacker's plan_volume multiplies on top.
+        self.intensity = intensity
+        # The match's usual pace: every crew at `intensity` x volume and, wherever its schemes allow, aiming at the
+        # defended bank. Both runs start the match this way; the attacker's plan changes the candidate from here.
+        self.match_baseline = {"plan_where": "planned", "plan_share_brindlemark": 1.0, "plan_share_arbelton": 0.0,
+                               "plan_share_cedarmoor": 0.0, "plan_share_dovrex": 0.0, "plan_share_everhollow": 0.0}
+        for ring in self.rings.values():
+            for run in (self.cand, self.ref):
+                run.intervene("ring", ring, "plan_volume", float(intensity))
+                for attr, value in self.match_baseline.items():
+                    run.intervene("ring", ring, attr, value)
         self.week = 0
         self.decisions = self.world.decisions(ROLE)
         lists = code_lists(self.world_path)
@@ -151,6 +163,8 @@ class Match:
             values = dict((plan or {}).get("all") or {})
             values.update(((plan or {}).get("rings") or {}).get(str(number)) or {})
             for attr, value in values.items():
+                if attr == "plan_volume":  # relative to the match intensity; unset means the intensity itself
+                    value = float(self.intensity) * (1.0 if value is None else float(value))
                 try:
                     self.cand.intervene("ring", ring, attr, value)
                 except Exception as error:

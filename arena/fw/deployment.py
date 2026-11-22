@@ -34,7 +34,7 @@ def compose(policy, builtin, gates, *, log=True):
     covered = {r["decision"] for r in own}
     rules = []
     for decision in gates:
-        if log:
+        if log and gates[decision] == "event":  # after-event decisions (e.g. txn monitoring) can't be labeled: skip
             rules.append({"decision": decision, "when": f"outside.{LOG} != none and outside.{LOG} > 1",
                           "action": _any_action(decision, builtin, own)})
         rules += [r for r in own if r["decision"] == decision] if decision in covered else \
@@ -48,7 +48,8 @@ def compose(policy, builtin, gates, *, log=True):
         outside[q] = {"options": list(spec["options"])}
     if outside:
         dep["outside"] = outside
-        reading = set(gates) if log else {d for spec in grayson.values() for d in spec["decisions"]}
+        reading = ({d for d, g in gates.items() if g == "event"} if log else set()) | \
+                  {d for spec in grayson.values() for d in spec["decisions"]}
         dep["external"] = {d: ({} if gates.get(d) == "event" else {"timeout": "1h"}) for d in reading}
     else:
         dep["format"] = 1

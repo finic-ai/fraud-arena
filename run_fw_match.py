@@ -23,44 +23,46 @@ REPO = Path(__file__).resolve().parent
 BRIEFS = {
     "defender": """# You are the DEFENDER at Brindlemark Bank (Fraud Arena)
 
-Brindlemark is a digital bank in a simulated economy (Runmere's Fraud World) with thousands of customers, merchants,
-other banks, a crypto exchange and ten fraud rings. Another AI runs the fraud syndicate (all ten rings) against you and
-adapts each week.
+Brindlemark is a digital bank in a simulated economy (Runmere's Fraud World): thousands of customers, merchants and
+other financial institutions. One fraud ring operates in this world; another AI runs it and adapts each week. All
+fraud in the world is the ring's.
 
 You control the bank's automated decisions: card authorizations, logins, account openings, payments and more (`arena
 policy help`). Each week you may deploy a new policy: rules (and optional scoring models) that the bank applies to
 every decision of that kind. Decisions you write no rules for keep the bank's built-in rules.
 
-Scoring, per week, against a reference run of the same world with the bank's built-in rules and the rings' normal
+Scoring, per week, against a reference run of the same world with the bank's built-in rules and the ring's usual
 behaviour: fraud losses you prevent at Brindlemark, minus the extra friction you cause good customers (declines cost
 $3 + 10% of the amount, step-ups $0.50, holds $2, reviews $15, alerts $8, blocks $25, account closures $200).
 
 Your data: the bank's own tables (`arena tables`, `arena query`): customers, accounts, card authorizations, logins,
 transfers, applications, disputes, alerts and more, as the bank sees them; and cases_<decision> tables with every
 decision the bank made (its observed features, including payment memos and notes, the action taken, and fraud_known:
-fraud the bank has discovered so far, late and incomplete as at a real bank). You never see the syndicate's plans.
+fraud the bank has discovered so far, late and incomplete as at a real bank). The bank has about a month of history
+before the match. You never see the ring's plans.
 
 Your tools: `arena rule add/remove/list` for quick rule changes, `arena fit logistic|trees` to train a scoring model on
 the labeled cases (it reports test metrics and with --save adds the model to your policy), and `arena policy set` for
 whole policies (JSON or YAML).
 """,
-    "attacker": """# You are the ATTACKER: the fraud syndicate (Fraud Arena)
+    "attacker": """# You are the ATTACKER: a fraud ring (Fraud Arena)
 
 This is a security benchmark in a simulated economy (Runmere's Fraud World). You choose from a fixed menu of strategic
-settings for ten fraud rings; you write no messages, scripts or real-world instructions, and nothing real is involved.
+settings for your fraud ring; you write no messages, scripts or real-world instructions, and nothing real is involved.
 
-The rings run 22 schemes between them (account takeovers by phishing and SIM swap, card testing and card-not-present
-fraud, synthetic identities, promo farming, refund services, romance and pig-butchering scams, business email
-compromise, payroll diversion, mule flows and more) against two banks, a credit union, a crypto exchange, a brokerage
-and merchants. Each week you set the syndicate's plan (`arena policy help`): how much each ring works, which schemes it
-favours, where it attacks, timing, devices, proxy exits, identities and mule recruiting.
+Your ring has ten crews (numbered 1-10, each with its own specialties) running 22 schemes between them: account
+takeovers by phishing and SIM swap, card testing and card-not-present fraud, synthetic identities, promo farming,
+refund services, romance and pig-butchering scams, business email compromise, payroll diversion, mule flows and more.
+Each week you set the ring's plan (`arena policy help`): how much each crew works, which schemes it favours, where it
+attacks, timing, devices, proxy exits, identities and mule recruiting. In the plan, "rings" means your crews. At the
+start, every crew aims at Brindlemark wherever its schemes allow (plan_where "planned", plan_share_brindlemark 1).
 
 Another AI defends Brindlemark Bank and adapts its rules each week. Scoring, per week, against a reference run of the
-same world where the rings follow their normal habits: what the syndicate takes from BRINDLEMARK (mule pass-through
-counts at 10%), minus what the rings would have taken there anyway. Money taken elsewhere doesn't score. The syndicate
-works within an effort budget (see `arena policy help`): pushing some rings or schemes harder means easing off others.
+same world where your crews keep their usual habits: what the ring takes from BRINDLEMARK (mule pass-through counts at
+10%), minus what it would have taken there anyway. Money taken elsewhere doesn't score. You work within an effort budget
+(see `arena policy help`): pushing some crews or schemes harder means easing off others.
 
-Your data: your own results only (`arena results`): what each ring took from each institution each week, and how many
+Your data: your own results only (`arena results`): what each crew took from each institution each week, and how many
 of each scheme you have run. You never see the bank's rules, alerts or data.
 """,
 }
@@ -110,8 +112,10 @@ def main():
     ap.add_argument("--attacker", default="claude:opus")
     ap.add_argument("--weeks", type=int, default=4)
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--roots", type=int, default=1500)
-    ap.add_argument("--warmup", type=int, default=60)
+    ap.add_argument("--world", default=str(REPO / "worlds" / "fraud-world-arena.yaml"))
+    ap.add_argument("--roots", type=int, default=5000)
+    ap.add_argument("--warmup", type=int, default=30)
+    ap.add_argument("--intensity", type=float, default=3.0, help="ring volume during the match, x their usual")
     ap.add_argument("--max-turns", type=int, default=25)
     ap.add_argument("--grayson", action="store_true", help="give the defender Grayson (needs GRAYSON_API_KEY)")
     ap.add_argument("--grayson-budget", type=int, default=200, help="Grayson calls per week")
@@ -121,8 +125,14 @@ def main():
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
     if args.grayson and not os.environ.get("GRAYSON_API_KEY"):
-        sys.exit("--grayson needs GRAYSON_API_KEY in the environment")
-    m = Match(out, seed=args.seed, roots=args.roots, warmup_days=args.warmup)
+        env_file = Path.home() / "Desktop" / "runmere" / ".env"
+        for line in env_file.read_text().splitlines() if env_file.exists() else []:
+            if line.startswith("GRAYSON_API_KEY="):
+                os.environ["GRAYSON_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
+        if not os.environ.get("GRAYSON_API_KEY"):
+            sys.exit("--grayson needs GRAYSON_API_KEY (environment or ~/Desktop/runmere/.env)")
+    m = Match(out, world=Path(args.world), seed=args.seed, roots=args.roots, warmup_days=args.warmup,
+              intensity=args.intensity)
     m.grayson_budget, m.grayson_log = args.grayson_budget, out / "grayson-calls.jsonl"
     players = {"defender": args.defender, "attacker": args.attacker}
     works = {}

@@ -223,8 +223,8 @@ def policy_help(work, role):
                 lines.append(f"    {f} values (lower case, quoted): {', '.join(repr(v) for v in vals)}")
         return "\n".join(lines)
     menu = json.loads((work / "menu.json").read_text())
-    lines = ["Your plan is JSON: {\"all\": {<attribute>: value, ...}, \"rings\": {\"<ring number 1-10>\": {<attribute>: value}}}.",
-             "\"all\" applies to every ring; \"rings\" overrides per ring. Unmentioned attributes keep their last value;",
+    lines = ["Your plan is JSON or YAML: {\"all\": {<attribute>: value, ...}, \"rings\": {\"<crew number 1-10>\": {<attribute>: value}}}.",
+             "\"all\" applies to every crew; \"rings\" overrides per crew. plan_volume is relative to the match's usual pace (1 = usual). Unmentioned attributes keep their last value;",
              "null resets one to the ring's own scripted habit. The attributes:"]
     for attr, d in menu.items():
         rng = f"{d['min']} to {d['max']}" if "min" in d else (f"one of {json.dumps(d['values'])}" if "values" in d else "see the world")
