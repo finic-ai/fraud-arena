@@ -76,8 +76,16 @@ def materialize(out, log=print):
     out = Path(out)
     db = connect_raw(out)
     (out / "bank").mkdir(exist_ok=True)
-    db.execute(f"""CREATE TABLE links AS SELECT "table" AS tbl, "row" AS rn, event, entity, load_time
-                   FROM t_row_links WHERE observer = '{OBSERVER}'""")
+    # A row about an entity (a customer, account, card, device...) is written once, in its latest version, with that
+    # version's load time; the bank has known the entity since it was created. Its LOAD_TS is therefore the entity's
+    # creation (the earliest valid_from of its attributes), so that as-of views keep it from then on.
+    db.execute(f"""CREATE TABLE created AS SELECT entity, min(valid_from) created FROM t_hidden
+                   WHERE entity IN (SELECT entity FROM t_row_links WHERE observer = '{OBSERVER}' AND entity IS NOT NULL)
+                   GROUP BY 1""")
+    db.execute(f"""CREATE TABLE links AS SELECT "table" AS tbl, "row" AS rn, event, l.entity,
+                          CASE WHEN l.entity IS NOT NULL THEN least(coalesce(c.created, l.load_time), l.load_time)
+                               ELSE l.load_time END AS load_time
+                   FROM t_row_links l LEFT JOIN created c ON c.entity = l.entity WHERE observer = '{OBSERVER}'""")
     parts = []
     for name in observer_tables(out):
         cols = [c[0] for c in db.execute(f'DESCRIBE "{name}"').fetchall()]

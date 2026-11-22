@@ -209,11 +209,33 @@ def reachable(db, seed, max_hops=3, max_size=REACH_KEY_SIZE):
     return hops
 
 
+def pattern_seed(members, alerts, start, T):
+    """(seed, member customers that fired the monitor, monitor, all customers that fired it in the window) for the
+    monitor that fired on the most members within [start, T], when at least 3 did."""
+    ids = {m["cust"] for m in members}
+    hits, allc = defaultdict(set), defaultdict(set)
+    first = {}
+    for a in alerts:
+        if start <= a["ts"] <= T:
+            allc[a["monitor"]].add(a["cust"])
+            if a["cust"] in ids:
+                hits[a["monitor"]].add(a["cust"])
+                first[(a["monitor"], a["cust"])] = min(first.get((a["monitor"], a["cust"]), a["ts"]), a["ts"])
+    if not hits:
+        return None
+    mon = max(hits, key=lambda m: (len(hits[m]), -len(allc[m])))
+    if len(hits[mon]) < 3:
+        return None
+    order = sorted(hits[mon], key=lambda c: first[(mon, c)])
+    seed = order[:max(2, min(4, len(order) // 3))]
+    return seed, set(order), mon, len(allc[mon])
+
+
 def seed_size(n):
     return max(2, min(6, math.ceil(0.35 * n)))
 
 
-def make_incident(out, group_key, members, truth, rng):
+def make_incident(out, group_key, members, truth, rng, alerts=None, group_all=()):
     """One incident case from a wave of a truth group, or None when it can't be seeded or expanded answerably."""
     members = sorted(members, key=lambda m: m["first_load"])
     if len(members) < 3:
@@ -228,17 +250,30 @@ def make_incident(out, group_key, members, truth, rng):
     db = open_asof(out / "bank", T, lock=False)
     build_keys(db)
     best = best_seed_key(db, visible)
-    if best is None:
-        return None
-    kind, key, holders, size = best
-    seed = holders[:seed_size(len(visible))]
-    hops = reachable(db, seed)
-    scored = [m for m in visible if m["cust"] in hops and m["cust"] not in seed]
+    scored, anomaly = [], None
+    if best is not None:
+        kind, key, holders, size = best
+        seed = holders[:seed_size(len(visible))]
+        hops = reachable(db, seed)
+        scored = [m for m in visible if m["cust"] in hops and m["cust"] not in seed]
+        anomaly = {"kind": kind, "key": key, "customers_with_key": size,
+                   "text": f"{len(seed)} customers " + KIND_TEXT[kind].format(k=key)
+                           + f" (the bank has {size} customers with this {kind.replace('_', ' ')} so far)"}
+    if not scored and alerts is not None:
+        # no rare shared key (typical of victims of one crew): seed on a monitor spike instead; the members that
+        # fired the same monitor in the window are the answerable ones
+        pat = pattern_seed(visible, alerts, window_start, T)
+        if pat is None:
+            return None
+        seed, hits, monitor, n_all = pat
+        hops = {c: (0 if c in seed else 1) for c in hits}
+        scored = [m for m in visible if m["cust"] in hits and m["cust"] not in seed]
+        anomaly = {"kind": "monitor", "key": monitor, "customers_with_key": n_all,
+                   "text": f"{len(seed)} customers of a recent cluster fired the monitor '{monitor}' "
+                           f"({MONITOR_DESCRIPTIONS[monitor]}); {n_all} customers fired it in the window"}
+        kind, key = "monitor", monitor
     if not scored:
         return None
-    anomaly = {"kind": kind, "key": key, "customers_with_key": size,
-               "text": f"{len(seed)} customers " + KIND_TEXT[kind].format(k=key)
-                       + f" (the bank has {size} customers with this {kind.replace('_', ' ')} so far)"}
     roles = {m["cust"]: m["truth"]["role"] for m in visible}
     return {"case_time": T, "window_start": window_start, "seed": seed, "anomaly": anomaly,
             "key": {"is_incident": True, "group": list(group_key), "ring": group_key[1] if group_key[0] == "ring" else None,
@@ -247,6 +282,8 @@ def make_incident(out, group_key, members, truth, rng):
                                  "scored": m["cust"] in hops,
                                  "seed": m["cust"] in seed} for m in visible],
                     "not_yet_visible": [m["cust"] for m in members if m["cust"] not in roles],
+                    # the same crew's customers outside this window: neither required nor counted as wrong
+                    "same_group_other": sorted({m["cust"] for m in group_all} - set(roles)),
                     "seed_key": [kind, key]}}
 
 
@@ -338,6 +375,7 @@ def build(out, *, n_alerts=40, n_incidents=12, n_fp=3, fraud_share=0.45, seed=0,
         index["alert"].append({"case_id": cid, "monitor": a["monitor"]})
 
     groups = truth_groups(truth)
+    alerts = run_monitors(out)
     incidents = []
     for gkey, members in sorted(groups.items(), key=lambda x: -len(x[1])):
         ws = waves(members)
@@ -346,7 +384,7 @@ def build(out, *, n_alerts=40, n_incidents=12, n_fp=3, fraud_share=0.45, seed=0,
         for w in sorted(ws, key=lambda w: -len(w)):
             if made >= 3:
                 break
-            inc = make_incident(out, gkey, w, truth, rng)
+            inc = make_incident(out, gkey, w, truth, rng, alerts, members)
             if inc:
                 incidents.append(inc)
                 made += 1

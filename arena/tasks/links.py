@@ -24,7 +24,8 @@ KEY_SQL = {
     "address": """SELECT CUST_ID, upper(ADDRESS) || ', ' || coalesce(ZIP, '') k, LOAD_TS ts FROM CUSTOMERS
                   WHERE ADDRESS IS NOT NULL""",
     "ach_originator": """SELECT CUST_ID, coalesce(CP_COMPANY_ID, CP_NAME) k, EFFECTIVE_TS ts FROM ACH
-                         WHERE DIRECTION = 'CREDIT' AND coalesce(CP_COMPANY_ID, CP_NAME) IS NOT NULL""",
+                         WHERE DIRECTION = 'CREDIT' AND ENTRY_DESC <> 'TRANSFER'
+                           AND coalesce(CP_COMPANY_ID, CP_NAME) IS NOT NULL""",
     "payee": """SELECT CUST_ID, lower(CP_HANDLE) k, TXN_TS ts FROM P2P WHERE DIRECTION = 'OUT' AND CP_HANDLE IS NOT NULL
                 UNION ALL SELECT CUST_ID, coalesce(PAYEE_ROUTING || ':' || PAYEE_ACCT_NO, lower(PAYEE_HANDLE)), ADDED_TS
                           FROM PAYEES WHERE coalesce(PAYEE_ACCT_NO, PAYEE_HANDLE) IS NOT NULL
