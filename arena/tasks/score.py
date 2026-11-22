@@ -102,7 +102,7 @@ def collect_answers(run_dir, task):
     """{case_id: answer or None} from runs/NAME/<task>/<case_id>/answer.json."""
     out = {}
     root = Path(run_dir) / task
-    for d in sorted(p for p in root.glob("*") if p.is_dir()):
+    for d in sorted(p for p in root.glob("*") if p.is_dir() and (p / "case.json").exists()):
         f = d / "answer.json"
         out[d.name] = json.loads(f.read_text()) if f.exists() else None
     return out

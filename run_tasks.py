@@ -26,10 +26,21 @@ PROMPT = """{brief}
 ## How to work
 Only `casefile` commands work here (run them with Bash, one command per call; no pipes, redirects or other programs).
 Start with `casefile tables` and `casefile customer ...`, then investigate with `casefile query`, `casefile links` and
-`casefile customer`. You have about {max_turns} tool calls in total: keep a few for the answer. Write your answer with
+`casefile customer`. {depth} You have about {max_turns} tool calls in total: keep a few for the answer. Write your answer with
 the Write tool to drafts/answer.json (only files under drafts/ can be written) and run
 `casefile submit drafts/answer.json`; fix and resubmit if it reports problems. When it is submitted, stop and reply with
 one line: your verdict."""
+
+
+# How deep to dig (prompt v2; v1 had no such line and players stopped after 2-6 commands). The same words for fraud
+# and benign cases.
+DEPTH = {
+    "alert": "Check the alert against the customer's whole history (logins and devices, profile changes, money in "
+             "and out, disputes and claims, calls) and the customer's rarer links before you decide; a careful review "
+             "takes 5-15 commands.",
+    "incident": "Look at every seed customer, follow their rarer links (and the links of the customers you add), and "
+                "check what the linked customers did, before you decide; a careful investigation takes 15-40 commands.",
+}
 
 
 def write_wrapper(bin_dir, work):
@@ -115,7 +126,7 @@ def cmd_run(a):
             return cid, {"seconds": round(time.time() - t0, 1), "cost_usd": 0.0}
         bin_dir = out / a.task / f"bin-{cid}"
         write_wrapper(bin_dir, work)
-        prompt = PROMPT.format(brief=(work / "brief.md").read_text(), max_turns=max_turns)
+        prompt = PROMPT.format(brief=(work / "brief.md").read_text(), max_turns=max_turns, depth=DEPTH[a.task])
         r = claude_turn(a.model, work, bin_dir, prompt, out / a.task / f"{cid}.claude.json", max_turns)
         r["submitted"] = (work / "answer.json").exists()
         r["commands"] = sum(1 for _ in open(work / "log.jsonl")) if (work / "log.jsonl").exists() else 0

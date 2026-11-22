@@ -269,8 +269,9 @@ def make_incident(out, group_key, members, truth, rng, alerts=None, group_all=()
         hops = {c: (0 if c in seed else 1) for c in hits}
         scored = [m for m in visible if m["cust"] in hits and m["cust"] not in seed]
         anomaly = {"kind": "monitor", "key": monitor, "customers_with_key": n_all,
-                   "text": f"{len(seed)} customers of a recent cluster fired the monitor '{monitor}' "
-                           f"({MONITOR_DESCRIPTIONS[monitor]}); {n_all} customers fired it in the window"}
+                   "text": f"{len(seed)} customers fired the monitor '{monitor}' "
+                           f"({MONITOR_DESCRIPTIONS[monitor]}) in the window, with similar activity "
+                           f"(the monitor fired on {n_all} customers in the window)"}
         kind, key = "monitor", monitor
     if not scored:
         return None
@@ -317,7 +318,7 @@ def fp_incidents(out, truth, times, rng, n):
         holders = [r[0] for r in db.execute("""SELECT CUST_ID FROM custkeys WHERE kind = ? AND k = ?
                                                AND last_ts >= CAST(? AS TIMESTAMPTZ) - INTERVAL 7 DAY
                                                ORDER BY last_ts DESC, CUST_ID""", [kind, key, str(T)]).fetchall()]
-        seed = holders[:min(6, max(3, len(holders) // 2))]
+        seed = holders[:min(len(holders), rng.randint(2, 4))]   # the same seed sizes as real incidents
         used_kinds[kind] += 1
         found.append({"case_time": T, "window_start": T - timedelta(days=30), "seed": seed,
                       "anomaly": {"kind": kind, "key": key, "customers_with_key": size,
