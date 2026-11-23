@@ -108,7 +108,7 @@ def benign_artifacts(out):
 
 def alert_candidates(out, truth):
     touched = truth.ever_touched()
-    artifacts = benign_artifacts(out)
+    artifacts = set()  # benign customers keep their (now realistic) fraud-like signals: hard negatives
     from .casedb import later_profile_changes
     changes = later_profile_changes(Path(out) / "bank")
     fraud, benign = [], []
