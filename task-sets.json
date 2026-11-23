@@ -1,5 +1,5 @@
 {
- "_doc": "Named seed sets for the investigation tasks (docs/tasks.md). Every set is public: dev is for development and published examples; an official set is the season's leaderboard set, chosen per season, with answers published after the season. All sets use the same world, scale and case counts. The calibration set fits each model's frozen tuned workflow combiner before any official case is scored.",
+ "_doc": "Named seed sets for the investigation tasks (docs/tasks.md). Every set is public: dev is for development and published examples; an official set is the season's leaderboard set, chosen per season, with answers published after the season. All sets use the same world, scale and case counts.",
  "world": {
   "roots": 8000,
   "days": 120
@@ -20,10 +20,6 @@
    201,
    202,
    203
-  ],
-  "calibration": [
-   301,
-   302
   ]
  }
 }

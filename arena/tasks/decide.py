@@ -1,4 +1,4 @@
-"""Alert decisions: the alert-review cases in a decision-model format.
+"""Alert decisions: the alert-review cases in a decision-model format (direct mode: one answer per case).
 
 The agentic alert review gives a model tools and lets it investigate. Here every player gets the same complete case
 packet (the alert, the customer's profile and timeline as of the case time, and who shares each of the customer's
