@@ -17,7 +17,9 @@ from pathlib import Path
 import duckdb
 
 REPO = Path(__file__).resolve().parents[2]
-WORLD = REPO / "worlds" / "fraud-world-tasks.yaml"
+# The tasks tier of Runmere's Fraud World (worlds/fraud-world/world.yaml at its default fraud_density); set
+# FA_TASKS_WORLD to that file. The local copy is the fallback.
+WORLD = Path(__import__("os").environ.get("FA_TASKS_WORLD") or REPO / "worlds" / "fraud-world-tasks.yaml")
 OBSERVER = "brindlemark"
 
 # Columns that hold an end-of-run state (a later return, closure, block or dispute decision) rather than the state at
