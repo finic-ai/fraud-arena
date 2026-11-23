@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from arena.fw.match import Match
 out = Path(sys.argv[1]); roots = int(sys.argv[2]) if len(sys.argv) > 2 else 2500
-m = Match(out.parent / "noise-work", world=Path("worlds/fraud-world-arena.yaml"), roots=roots, warmup_days=20, intensity=3.0)
+m = Match(out.parent / "noise-work", roots=roots, warmup_days=20, intensity=3.0)
 m.set_plan({"all": {"plan_tactic_ach_return": 2, "plan_tactic_card_testing": 2}})
 # the defender redeploys the built-in rules as its own policy (so the candidate is a different fork with the same rules)
 builtin_policy = {"format": 1, "rules": [dict(r) for r in m.builtin]}

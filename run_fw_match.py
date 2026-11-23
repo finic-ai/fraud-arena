@@ -145,7 +145,7 @@ def main():
     ap.add_argument("--attacker", default="claude:opus")
     ap.add_argument("--weeks", type=int, default=4)
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--world", default=str(REPO / "worlds" / "fraud-world-arena.yaml"))
+    ap.add_argument("--world", help="a world file (default: the 1v1 tier of the hub version in fraud-world.json)")
     ap.add_argument("--roots", type=int, default=5000)
     ap.add_argument("--warmup", type=int, default=30)
     ap.add_argument("--intensity", type=float, default=3.0, help="ring volume during the match, x their usual")
@@ -156,7 +156,7 @@ def main():
 
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
-    m = Match(out, world=Path(args.world), seed=args.seed, roots=args.roots, warmup_days=args.warmup,
+    m = Match(out, world=args.world and Path(args.world), seed=args.seed, roots=args.roots, warmup_days=args.warmup,
               intensity=args.intensity, history_cache=args.history_cache)
     players = {"defender": args.defender, "attacker": args.attacker}
     works = {}

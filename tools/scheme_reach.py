@@ -8,7 +8,7 @@ from arena.fw import scoring
 from arena.fw.config import INSTITUTIONS
 
 out = Path(sys.argv[1]); roots = int(sys.argv[2]) if len(sys.argv) > 2 else 3000
-m = Match(out.parent / "reach-work", world=Path("worlds/fraud-world-arena.yaml"), roots=roots, warmup_days=30, intensity=3.0)
+m = Match(out.parent / "reach-work", roots=roots, warmup_days=30, intensity=3.0)
 start, end_day = iso(m.cand.time), m.warmup_days + 7
 
 def take(run, tag):

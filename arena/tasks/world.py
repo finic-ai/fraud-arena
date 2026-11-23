@@ -17,9 +17,15 @@ from pathlib import Path
 import duckdb
 
 REPO = Path(__file__).resolve().parents[2]
-# The tasks tier of Runmere's Fraud World (worlds/fraud-world/world.yaml at its default fraud_density); set
-# FA_TASKS_WORLD to that file. The local copy is the fallback.
-WORLD = Path(__import__("os").environ.get("FA_TASKS_WORLD") or REPO / "worlds" / "fraud-world-tasks.yaml")
+
+
+def world_file():
+    """The tasks tier of the Fraud World version pinned in fraud-world.json ($FA_TASKS_WORLD overrides it)."""
+    import os
+    from ..world_source import tier
+    return Path(os.environ.get("FA_TASKS_WORLD") or tier("tasks"))
+
+
 OBSERVER = "brindlemark"
 
 # Columns that hold an end-of-run state (a later return, closure, block or dispute decision) rather than the state at
@@ -37,8 +43,10 @@ MASKS = {
 }
 
 
-def simulate(out, *, seed, roots, days, world=WORLD, log=print):
+def simulate(out, *, seed, roots, days, world=None, log=print):
     import runmere
+    from ..world_source import PIN
+    world = world or world_file()
     out = Path(out)
     (out / "truth").mkdir(parents=True, exist_ok=True)
     t0 = time.time()
@@ -51,7 +59,8 @@ def simulate(out, *, seed, roots, days, world=WORLD, log=print):
         run.run_until_day(days)
     run.write_observer(OBSERVER, str(out / "truth" / "obs"))
     run.write_truth(str(out / "truth" / "world"))
-    meta = {"seed": seed, "roots": roots, "days": days, "world": (str(Path(world).relative_to(REPO)) if Path(world).is_relative_to(REPO) else str(world)),
+    meta = {"seed": seed, "roots": roots, "days": days, "world": Path(world).name,
+            "hub": {"world_id": PIN["world_id"], "version": PIN["version"], "sha256": PIN["sha256"]},
             "world_version": runmere.World.load(str(world)).version(),
             "seconds": round(time.time() - t0)}
     (out / "world.json").write_text(json.dumps(meta, indent=1))
