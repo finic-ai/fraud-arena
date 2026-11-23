@@ -127,7 +127,8 @@ def answer_baseline(case_dir, text):
 LLM_SYSTEM = """You are a fraud analyst. You get one alert case packet from a bank and answer three questions with
 probabilities. Reply with JSON only, exactly this shape: {"disposition": {"fraud": p, "not_fraud": p},
 "typology": {<option>: p, ...}, "customer_role": {<option>: p, ...}}. disposition and customer_role probabilities sum
-to 1; typology gives an independent probability per option (any number may apply)."""
+to 1; typology gives an independent probability per option (any number may apply). Give probabilities to two
+decimals (e.g. 0.07, 0.83), not rounded to tenths."""
 
 
 def _question_text():
@@ -159,7 +160,7 @@ def answer_llm(model, text, *, retries=2):
                     float((d.get("usage") or {}).get("cost") or 0.0))
         except Exception as e:  # noqa: BLE001  (a failed parse counts as uniform after retries)
             last = e
-    return ({q: _normalize({}, QUESTIONS[q]["criteria"]) for q in QUESTIONS}, 0.0) if last else None
+    raise RuntimeError(f"no parseable answer after {retries + 1} tries: {type(last).__name__}: {last}")
 
 
 def answer_claude(model, text):
@@ -321,9 +322,11 @@ def _macro_ap(fraud):
 
 
 # --- the leaderboard ------------------------------------------------------------------------------------------------
-# Rank by PR-AUC at the real-world alert fraud rate; alongside: precision at 80% recall, log loss, fraud type (the
-# top-ranked type is one of the true types) and customer role. Cases are enriched with fraud for statistical power;
-# benign cases are weighted back to the real-world rate, which every player is told (case-control sampling).
+# Rank by ROC-AUC (it doesn't depend on the assumed fraud rate; McDermott et al., NeurIPS 2024); alongside: PR-AUC,
+# log loss and Brier score at the real-world alert fraud rate, and precision at 80% recall (the usual operating point
+# for human-review triage: CUAD, technology-assisted review). Fraud type (the top-ranked type is one of the true
+# types) and customer role are reported too. Cases are enriched with fraud for statistical power; benign cases are
+# weighted back to the real-world rate, which every player is told (case-control sampling).
 
 def leaderboard_metrics(keys, results, rate=None, recall_target=0.80):
     rate = rate or REAL_WORLD_ALERT_FRAUD_RATE
@@ -346,9 +349,14 @@ def leaderboard_metrics(keys, results, rate=None, recall_target=0.80):
             prec_at_recall = tp / (tp + fp)
         i = j
     ll = sum((1 if yy else w) * -math.log(pp if yy else 1 - pp) for pp, yy in zip(p, y)) / (P + N * w)
+    brier = sum((1 if yy else w) * (pp - yy) ** 2 for pp, yy in zip(p, y)) / (P + N * w)
+    pos = sorted(pp for pp, yy in zip(p, y) if yy); neg = sorted(pp for pp, yy in zip(p, y) if not yy)
+    import bisect
+    roc = sum(bisect.bisect_left(neg, q) + 0.5 * (bisect.bisect_right(neg, q) - bisect.bisect_left(neg, q))
+              for q in pos) / (len(pos) * len(neg)) if pos and neg else None
     fraud = [(a, k) for a, k in rows if k["disposition"] == "fraud"]
     typ = sum(max(a["typology"], key=a["typology"].get) in set(k.get("typologies") or [k["typology"]]) for a, k in fraud)
     role = sum(max(a["customer_role"], key=a["customer_role"].get) == k["customer_role"] for a, k in rows)
-    return {"pr_auc": ap, "precision_at_80_recall": prec_at_recall, "log_loss": ll,
+    return {"roc_auc": roc, "pr_auc": ap, "log_loss": ll, "brier": brier, "precision_at_80_recall": prec_at_recall,
             "fraud_type": typ / len(fraud) if fraud else None, "customer_role": role / len(rows), "n": len(rows),
             "fraud": P}

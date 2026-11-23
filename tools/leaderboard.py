@@ -12,13 +12,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from arena.tasks.decide import leaderboard_metrics  # noqa: E402
 
-COLS = ["pr_auc", "precision_at_80_recall", "log_loss", "fraud_type", "customer_role"]
+COLS = ["roc_auc", "pr_auc", "log_loss", "brier", "precision_at_80_recall", "fraud_type", "customer_role"]
 
 ap = argparse.ArgumentParser()
 ap.add_argument("cases", nargs="+")
 ap.add_argument("--results", nargs="+", required=True, help="name=file1.json,file2.json")
 ap.add_argument("--rate", type=float, default=None)
 ap.add_argument("--boots", type=int, default=1000)
+ap.add_argument("--json", help="write the board (point estimates and 95% CIs) here")
 a = ap.parse_args()
 
 keys, seed_of = {}, {}
@@ -82,3 +83,12 @@ if len(names) == 2:
 print("\nPR-AUC per seed:")
 for s in seeds:
     print(f"  s{s} ({len(by_seed[s])} alerts): " + "  ".join(f"{n} {metrics(n, by_seed[s])['pr_auc']:.3f}" for n in players))
+
+if a.json:
+    board = {"rate": a.rate, "seeds": seeds, "n": len(common), "fraud": fraud, "columns": COLS, "players": {}}
+    for n in players:
+        board["players"][n] = {k: {"value": point[n][k], "ci95": list(ci(boots[n][k]))} for k in COLS}
+        board["players"][n]["pr_auc_by_seed"] = {f"s{s}": metrics(n, by_seed[s])["pr_auc"] for s in seeds}
+    Path(a.json).write_text(json.dumps(board, indent=1))
+    print("wrote", a.json)
+
