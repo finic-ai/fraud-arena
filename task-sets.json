@@ -5,7 +5,7 @@
   "days": 120
  },
  "cases": {
-  "alerts": 40,
+  "alerts": 450,
   "incidents": 12,
   "fp": 4,
   "fraud_share": 0.4,
@@ -19,9 +19,7 @@
   "official-2027s1": [
    201,
    202,
-   203,
-   204,
-   205
+   203
   ]
  }
 }
