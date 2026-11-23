@@ -2,7 +2,8 @@
 
     python run_fw_match.py --defender claude:sonnet --attacker claude:opus --weeks 4 --out runs/NAME
     (a player is openrouter:<model id> for the benchmark harness: mini-SWE-agent over OpenRouter, any model;
-    claude:<model> for a Claude Code session, for smoke tests; or builtin for the bank's rules / the rings' scripts)
+    claude:<model> for a Claude Code session, for smoke tests; builtin for the bank's rules / the rings' scripts; or,
+    for the defender, baseline:models for the scripted model-only reference)
 
 Each Claude Code player runs on this machine with your Claude Code login, restricted to one tool: its own `arena`
 command (Bash(arena:*)), with no MCP servers, no user settings or hooks, and no session saved.
@@ -36,18 +37,21 @@ every decision of that kind. Decisions you write no rules for keep the bank's bu
 Scoring, per week: the same week is replayed with the bank's built-in rules against the very same attack. Your score
 is the fraud losses your policy prevented at Brindlemark compared with that replay, minus the extra friction you cause
 good customers (declines cost $3 + 10% of the amount, step-ups $0.50, holds $2, reviews $15, alerts $8, blocks $25,
-account closures $200). A harder attack doesn't lower your score by itself; only what your policy does counts.
+account closures $200). The bank's analysts can work 10 reviews a day; reviews beyond that cost $75 each (overtime).
+A harder attack doesn't lower your score by itself; only what your policy does counts.
 
 Your data: the bank's own tables (`arena tables`, `arena query`): customers, accounts, card authorizations, logins,
 transfers, applications, disputes, alerts and more, as the bank sees them; and cases_<decision> tables with every
 decision the bank made (its observed features, including payment memos and notes, the action taken, and fraud_known:
 fraud the bank has discovered or its victim has reported so far: most victims report within days, some never do, so
-recent fraud is often still unlabeled). The bank has about a month of history
-before the match. You never see the ring's plans.
+recent fraud is often still unlabeled). The bank has {history} of history before the match. You
+never see the ring's plans.
 
-Your tools: `arena rule add/remove/list` for quick rule changes, `arena fit logistic|trees` to train a scoring model on
-the labeled cases (it reports test metrics and with --save adds the model to your policy), and `arena policy set` for
-whole policies (JSON or YAML).
+Your tools: `arena rule add/remove/list` for quick rule changes; `arena fit logistic|trees` to train a scoring model on
+the labeled cases (it reports test metrics and the net dollars each cutoff would have made, and with --save adds the
+model to your policy); `arena list set` for lists the bank checks at decision time (e.g. devices, accounts or
+customers tied to confirmed fraud), which rules read as outside.list_NAME; and `arena policy set` for whole policies
+(JSON or YAML).
 """,
     "attacker": """# You are the ATTACKER: a fraud ring (Fraud Arena)
 
@@ -131,19 +135,22 @@ def main():
     ap.add_argument("--warmup", type=int, default=30)
     ap.add_argument("--intensity", type=float, default=3.0, help="ring volume during the match, x their usual")
     ap.add_argument("--max-turns", type=int, default=25)
+    ap.add_argument("--history-cache", help="a folder holding this seed's warm-up (built once, shared by defenders)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
     m = Match(out, world=Path(args.world), seed=args.seed, roots=args.roots, warmup_days=args.warmup,
-              intensity=args.intensity)
+              intensity=args.intensity, history_cache=args.history_cache)
     players = {"defender": args.defender, "attacker": args.attacker}
     works = {}
     for role, who in players.items():
         work = out / role
         work.mkdir()
         (work / "role").write_text(role)
+        if role == "defender":
+            BRIEFS["defender"] = BRIEFS["defender"].replace("{history}", f"{args.warmup} days")
         (work / "brief.md").write_text(BRIEFS[role])
         (work / "notes.md").write_text("")
         (work / "data").mkdir()
@@ -202,8 +209,20 @@ def main():
             turns = dict(zip(players, pool.map(turn, players)))
 
         deploy_error = None
+        if players["defender"] == "baseline:models":  # the scripted model-only reference defender
+            from arena.fw.baseline import model_policy
+            print(f"week {wk + 1} model baseline:", flush=True)
+            pol = model_policy(works["defender"])
+            covered = {r["decision"] for r in pol["rules"]}
+            pol["rules"] += [r for r in m.builtin if r["decision"] in covered]  # built-in rules stay behind the model
+            if not pol["models"]:
+                pol.pop("models")
+            (works["defender"] / "policy.json").write_text(json.dumps(pol, indent=1))
+            deploy_error = m.deploy(pol)
         if is_ai(players["defender"]):
-            deploy_error = m.deploy(json.loads((works["defender"] / "policy.json").read_text()))
+            lf = works["defender"] / "lists.json"
+            deploy_error = m.deploy(json.loads((works["defender"] / "policy.json").read_text()),
+                                    json.loads(lf.read_text()) if lf.exists() else None)
         plan_problems = []
         if is_ai(players["attacker"]):
             from arena.fw.cli import budget_problems

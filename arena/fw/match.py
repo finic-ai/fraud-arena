@@ -62,25 +62,60 @@ def code_lists(world_path=WORLD):
     return {k: v.get("values", []) for k, v in ((spec.get("vocab") or {}).get("code_lists") or {}).items()}
 
 
+def _run_all(runs, day):
+    """Advance runs to `day` in parallel threads; returns each run's exception or None."""
+    import threading
+    errors = [None] * len(runs)
+
+    def go(i):
+        try:
+            runs[i].run_until_day(day)
+        except Exception as error:  # noqa: BLE001
+            errors[i] = error
+
+    threads = [threading.Thread(target=go, args=(i,)) for i in range(len(runs))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return errors
+
+
 class Match:
-    def __init__(self, out, *, world=WORLD, seed=7, roots=1500, warmup_days=60, week_days=7, intensity=1.0):
+    def __init__(self, out, *, world=WORLD, seed=7, roots=1500, warmup_days=60, week_days=7, intensity=1.0,
+                 history_cache=None):
         self.out = Path(out)
+        self.lists = {}  # the defender's lists: name -> {key, set of values}
         self.world_path, self.seed, self.roots = Path(world), seed, roots
         self.week_days, self.warmup_days = week_days, warmup_days
         self.world = runmere.World.load(str(self.world_path))
-        base = self.world.start(seed, 1, roots)
         # Log the bank's cases during the warm-up too (its history, for training): the logging deployment is
         # behaviour-identical to the built-in rules, and it is taken away before the checkpoint.
         self.builtin, self.gates = world_bits(self.world_path, ROLE, "brindlemark_rules")
         self.week_cases = []
-        base.deploy(ROLE, compose({}, self.builtin, self.gates))
-        base.set_outside(self._outside)
-        base.run_until_day(warmup_days)
-        history = self.week_cases
-        base.undeploy(ROLE)
-        base.set_outside(None)
+        # The warm-up depends only on (world, seed, households, days), so it is built once and shared: every
+        # defender playing this seed starts from the identical history.
+        cache = Path(history_cache) if history_cache else None
+        if cache and (cache / "checkpoint.bin").exists():
+            import pickle
+            ckpt = (cache / "checkpoint.bin").read_bytes()
+            history = pickle.loads((cache / "history_cases.pkl").read_bytes())
+            base = runmere.Run.restore(self.world, ckpt, roots)
+        else:
+            base = self.world.start(seed, 1, roots)
+            base.deploy(ROLE, compose({}, self.builtin, self.gates))
+            base.set_outside(self._outside)
+            base.run_until_day(warmup_days)
+            history = self.week_cases
+            base.undeploy(ROLE)
+            base.set_outside(None)
+            ckpt = base.checkpoint()
+            if cache:
+                import pickle
+                cache.mkdir(parents=True, exist_ok=True)
+                (cache / "history_cases.pkl").write_bytes(pickle.dumps(history))
+                (cache / "checkpoint.bin").write_bytes(ckpt)
         self.history_truth = self.out / "truth" / "warmup"
-        ckpt = base.checkpoint()
         self.cand = runmere.Run.restore(self.world, ckpt, roots)
         self.ref = runmere.Run.restore(self.world, ckpt, roots)
         rings = self.cand.entities("ring", ["number"]).to_pylist()
@@ -129,9 +164,9 @@ class Match:
 
     def _outside(self, case, view):
         """Answers the candidate run's outside requests: logs the case (the defender's training data)."""
-        return self._answer(case, view, log=True)
+        return self._answer(case, view, log=True, lists=self.lists)
 
-    def _answer(self, case, view, *, log):
+    def _answer(self, case, view, *, log, lists=None):
         needs = case.get("needs", [])
         answers = {}
         if LOG in needs:
@@ -141,13 +176,18 @@ class Match:
                                         "identifiers": case.get("identifiers") or {}})
             answers[LOG] = 0.0
         rest = [n for n in needs if n != LOG]
-        if rest:
-            raise ValueError(f"no outside source for {rest}")
+        ids = {k.split(".")[-1].lower(): str(v) for k, v in (case.get("identifiers") or {}).items() if v is not None}
+        for n in rest:
+            spec = (lists or {}).get(n[5:]) if n.startswith("list_") else None
+            if spec is None:
+                raise ValueError(f"no outside source for {n}")
+            answers[n] = 1.0 if ids.get(spec["key"]) in spec["set"] else 0.0
         return answers
 
     def _quiet_outside(self, policy):
-        """An outside dispatcher for a counterfactual run of `policy`: no case logging."""
-        return lambda case, view: self._answer(case, view, log=False)
+        """An outside dispatcher for a counterfactual run of `policy`: no case logging, the same lists."""
+        lists = self.lists
+        return lambda case, view: self._answer(case, view, log=False, lists=lists)
 
     def _script_plan(self, run):
         """Put every ring of `run` back on the match's usual pace: the scripted crews, no attacker plan."""
@@ -165,19 +205,20 @@ class Match:
                     continue
                 run.intervene("ring", ring, attr, value)
 
-    def _apply(self, run, policy):
-        run.deploy(ROLE, compose(policy or {}, self.builtin, self.gates))
+    def _apply(self, run, policy, lists=None):
+        self.lists = {n: {"key": l["key"], "set": set(l["values"])} for n, l in (lists or {}).items()}
+        run.deploy(ROLE, compose(policy or {}, self.builtin, self.gates, lists=self.lists))
         run.set_outside(self._outside)
 
     # --- applying the players' choices -------------------------------------------------------------------------
 
-    def deploy(self, policy):
+    def deploy(self, policy, lists=None):
         """Deploy the defender's policy into the candidate run; None restores the built-in rules. Returns an error
         message, or None. A failed deploy leaves the previous policy in place."""
         try:
-            self.previous = self.deployed
-            self._apply(self.cand, policy)
-            self.deployed = policy
+            self.previous, self.previous_lists = self.deployed, getattr(self, "deployed_lists", None)
+            self._apply(self.cand, policy, lists)
+            self.deployed, self.deployed_lists = policy, lists
             return None
         except Exception as error:
             return f"{type(error).__name__}: {error}"
@@ -223,34 +264,36 @@ class Match:
         start = iso(self.cand.time)
         self.runtime_error = None
         week_start = self.cand
-        trial = week_start.fork()
-        trial.set_outside(self._outside)
         self.week_cases = []
-        try:
-            trial.run_until_day(end_day)
-            self.cand = trial
-        except Exception as error:
-            # The defender's rules stopped the run (e.g. ordering a `none` feature): keep the previous policy and
-            # play the week from the untouched week-start state.
-            self.runtime_error = f"{type(error).__name__}: {error}"
-            self.week_cases = []
-            self._apply(week_start, self.previous)
-            self.deployed = self.previous
+
+        def forks():
             trial = week_start.fork()
             trial.set_outside(self._outside)
-            trial.run_until_day(end_day)
-            self.cand = trial
-        # No-defense counterfactual: the same week-start state with the built-in rules.
-        no_def = week_start.fork()
+            no_att = week_start.fork()  # the defender's policy against the scripted crews
+            no_att.set_outside(self._quiet_outside(self.deployed))
+            self._script_plan(no_att)
+            return trial, no_att
+
+        trial, no_att = forks()
+        no_def = week_start.fork()  # the bank's built-in rules against the same attacker plan
         no_def.undeploy(ROLE)
         no_def.set_outside(None)
-        no_def.run_until_day(end_day)
-        # No-attack counterfactual: the same week-start state with the defender's policy and the scripted crews.
-        no_att = week_start.fork()
-        no_att.set_outside(self._quiet_outside(self.deployed))
-        self._script_plan(no_att)
-        no_att.run_until_day(end_day)
-        self.ref.run_until_day(end_day)
+        # The four runs advance concurrently: the engine releases the GIL while it simulates.
+        errors = _run_all([trial, no_att, no_def, self.ref], end_day)
+        if errors[0] or errors[1]:
+            # The defender's rules stopped the run (e.g. ordering a `none` feature): keep the previous policy and
+            # play the week again from the untouched week-start state.
+            self.runtime_error = f"{type(errors[0] or errors[1]).__name__}: {errors[0] or errors[1]}"
+            self.week_cases = []
+            self._apply(week_start, self.previous, getattr(self, "previous_lists", None))
+            self.deployed, self.deployed_lists = self.previous, getattr(self, "previous_lists", None)
+            trial, no_att = forks()
+            again = _run_all([trial, no_att], end_day)
+            if any(again):
+                raise next(e for e in again if e)
+        if errors[2] or errors[3]:
+            raise errors[2] or errors[3]
+        self.cand = trial
         end = iso(self.cand.time)
         self.week += 1
         wdir = self.out / "truth" / f"week{self.week}"
