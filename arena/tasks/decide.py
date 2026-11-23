@@ -37,7 +37,6 @@ TYPOLOGIES = {
     "promo_abuse": "accounts farmed for sign-up or referral bonuses",
     "check_fraud": "check kiting or counterfeit or altered checks",
     "other": "any other fraud (e.g. structuring)",
-    "none": "no fraud",
 }
 QUESTIONS = {
     "disposition": {
@@ -45,7 +44,8 @@ QUESTIONS = {
                         "of a fraud that had already started by the case time.",
         "criteria": {"fraud": "fraud is involved", "not_fraud": "no fraud: a benign look-alike"}},
     "typology": {
-        "instructions": "Which kind of fraud is this (none if no fraud)?",
+        "instructions": "If this alert involves fraud, which kind is it? (Answer as if it were fraud; whether it is "
+                        "fraud at all is the disposition question.)",
         "criteria": TYPOLOGIES},
     "customer_role": {
         "instructions": "What is this customer's role?",
@@ -109,8 +109,7 @@ def answer_baseline(case_dir, text):
     a = json.loads((Path(case_dir) / "case.json").read_text())["alert"]["type"]
     p = 0.6 if a in ("referral_velocity", "p2p_pass_through", "card_step_up", "new_device_contact_change") else 0.4
     return {"disposition": {"fraud": p, "not_fraud": 1 - p},
-            "typology": _normalize({"none": 1 - p, "ato": p / 3, "card_compromise": p / 3, "first_party": p / 3},
-                                   TYPOLOGIES),
+            "typology": _normalize({"ato": 1, "card_compromise": 1, "first_party": 1}, TYPOLOGIES),
             "customer_role": {"perpetrator": p / 2, "victim": p / 2, "mule": 0.0, "legitimate": 1 - p}}
 
 
