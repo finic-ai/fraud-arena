@@ -19,7 +19,7 @@ ap.add_argument("cases", nargs="+")
 ap.add_argument("--results", nargs="+", required=True, help="name=file1.json,file2.json")
 ap.add_argument("--rate", type=float, default=None)
 ap.add_argument("--boots", type=int, default=1000)
-ap.add_argument("--json", help="write the board (point estimates and 95% CIs) here")
+ap.add_argument("--json", help="write the board (point estimates and 95%% CIs) here")
 a = ap.parse_args()
 
 keys, seed_of = {}, {}
