@@ -109,9 +109,13 @@ def benign_artifacts(out):
 def alert_candidates(out, truth):
     touched = truth.ever_touched()
     artifacts = benign_artifacts(out)
+    from .casedb import later_profile_changes
+    changes = later_profile_changes(Path(out) / "bank")
     fraud, benign = [], []
     for a in run_monitors(out):
         T = a["ts"] + ALERT_DELAY
+        if any(t > T for t in changes.get(a["cust"], [])):
+            continue  # the profile would show a contact detail from after the case time
         r = truth.customer(a["cust"], as_of=T)
         if r is None:
             if a["cust"] not in touched and a["cust"] not in artifacts:
@@ -173,12 +177,24 @@ def sample_alerts(fraud, benign, n, fraud_share, rng):
     return cases
 
 
+def typologies_of(r):
+    """Every typology that applies to the alert: the primary one, each relevant involvement's family, synthetic_identity
+    for an account opened in a stolen or made-up identity, and mule for an account that passed stolen money on."""
+    t = {r["typology"]} | {i["family"] for i in r["involvements"] if i["role"] and i.get("family")}
+    if r.get("identity") not in (None, "real"):
+        t.add("synthetic_identity")
+    if r["role"] == "mule" or any(i.get("part") == "mule" or i.get("role") == "mule" for i in r["involvements"]):
+        t.add("mule")
+    return sorted(x for x in t if x and x != "none")
+
+
 def alert_key(a):
     r = a["truth"]
     if r is None:
-        return {"disposition": "not_fraud", "typology": "none", "customer_role": "legitimate", "ring": None,
-                "scenario": None}
-    return {"disposition": "fraud", "typology": r["typology"], "customer_role": r["role"], "ring": r["ring"],
+        return {"disposition": "not_fraud", "typology": "none", "typologies": [], "customer_role": "legitimate",
+                "ring": None, "scenario": None}
+    return {"disposition": "fraud", "typology": r["typology"], "typologies": typologies_of(r),
+            "customer_role": r["role"], "ring": r["ring"],
             "scenario": r["scenario"], "identity": r["identity"],
             "involvements": [{k: (iso(v) if hasattr(v, "isoformat") else v) for k, v in i.items() if k != "rows"}
                              for i in r["involvements"]]}

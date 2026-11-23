@@ -45,8 +45,10 @@ QUESTIONS = {
                         "of a fraud that had already started by the case time.",
         "criteria": {"fraud": "fraud is involved", "not_fraud": "no fraud: a benign look-alike"}},
     "typology": {
-        "instructions": "If this alert involves fraud, which kind is it? (Answer as if it were fraud; whether it is "
-                        "fraud at all is the disposition question.)",
+        "multi": True,
+        "instructions": "If this alert involves fraud, which kinds does it involve? Any number may apply (e.g. bonus "
+                        "farming in a stolen identity is both). Answer as if it were fraud; whether it is fraud at all "
+                        "is the disposition question.",
         "criteria": TYPOLOGIES},
     "customer_role": {
         "instructions": "What is this customer's role?",
@@ -101,6 +103,13 @@ def _build_packet(case_dir, max_chars):
 
 # --- players ---------------------------------------------------------------------------------------------------
 
+def _answer(q, probs):
+    """Normalize a single-choice answer; keep a multi-label answer's independent probabilities, clipped to [0, 1]."""
+    if QUESTIONS[q].get("multi"):
+        return {o: min(max(float(probs.get(o) or 0.0), 0.0), 1.0) for o in QUESTIONS[q]["criteria"]}
+    return _normalize(probs, QUESTIONS[q]["criteria"])
+
+
 def _normalize(probs, options):
     p = {o: max(0.0, float(probs.get(o) or 0.0)) for o in options}
     s = sum(p.values())
@@ -116,8 +125,9 @@ def answer_baseline(case_dir, text):
 
 
 LLM_SYSTEM = """You are a fraud analyst. You get one alert case packet from a bank and answer three questions with
-probabilities. Reply with JSON only, exactly this shape (each question's probabilities sum to 1):
-{"disposition": {"fraud": p, "not_fraud": p}, "typology": {<option>: p, ...}, "customer_role": {<option>: p, ...}}"""
+probabilities. Reply with JSON only, exactly this shape: {"disposition": {"fraud": p, "not_fraud": p},
+"typology": {<option>: p, ...}, "customer_role": {<option>: p, ...}}. disposition and customer_role probabilities sum
+to 1; typology gives an independent probability per option (any number may apply)."""
 
 
 def _question_text():
@@ -145,7 +155,7 @@ def answer_llm(model, text, *, retries=2):
             content = d["choices"][0]["message"]["content"] or ""
             m = re.search(r"\{.*\}", content, re.S)
             ans = json.loads(m.group(0))
-            return ({q: _normalize(ans.get(q) or {}, QUESTIONS[q]["criteria"]) for q in QUESTIONS},
+            return ({q: _answer(q, ans.get(q) or {}) for q in QUESTIONS},
                     float((d.get("usage") or {}).get("cost") or 0.0))
         except Exception as e:  # noqa: BLE001  (a failed parse counts as uniform after retries)
             last = e
@@ -163,7 +173,7 @@ def answer_claude(model, text):
     d = json.loads(p.stdout)
     m = re.search(r"\{.*\}", d.get("result") or "", re.S)
     ans = json.loads(m.group(0)) if m else {}
-    return {q: _normalize(ans.get(q) or {}, QUESTIONS[q]["criteria"]) for q in QUESTIONS}, float(d.get("total_cost_usd") or 0)
+    return {q: _answer(q, ans.get(q) or {}) for q in QUESTIONS}, float(d.get("total_cost_usd") or 0)
 
 
 def _post_with_backoff(req, tries=8):
@@ -183,9 +193,14 @@ def _post_with_backoff(req, tries=8):
 def answer_jev(text, model="typesafe/jev-1.14"):
     """Jev (TypeSafe's decision model) through OpenRouter's System One API: the same state + choice questions."""
     key = os.environ["OPENROUTER_API_KEY"]
-    body = {"model": model, "state": {"case_packet": text},
-            "questions": {q: {"type": "choice", "instructions": s["instructions"], "criteria": s["criteria"]}
-                          for q, s in QUESTIONS.items()}}
+    qs = {}
+    for q, spec in QUESTIONS.items():
+        if spec.get("multi"):
+            for o, meaning in spec["criteria"].items():
+                qs[f"{q}__{o}"] = {"type": "noul", "instructions": f"{spec['instructions']}\nDoes this kind apply: {meaning}"}
+        else:
+            qs[q] = {"type": "choice", "instructions": spec["instructions"], "criteria": spec["criteria"]}
+    body = {"model": model, "state": {"case_packet": text}, "questions": qs}
     req = Request("https://openrouter.ai/api/v1/systemone", data=json.dumps(body).encode(),
                   headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
     with urlopen(req, timeout=120) as r:
@@ -195,8 +210,15 @@ def answer_jev(text, model="typesafe/jev-1.14"):
 
 def _parse_choice_answers(d):
     out = {}
+    answers = d.get("answers") or {}
     for q, spec in QUESTIONS.items():
-        a = (d.get("answers") or {}).get(q) or {}
+        if spec.get("multi") and any(k.startswith(q + "__") for k in answers):  # expanded yes/no per option
+            out[q] = {o: float((answers.get(f"{q}__{o}") or {}).get("noul") or 0.0) for o in spec["criteria"]}
+            continue
+        if spec.get("multi"):
+            out[q] = _answer(q, (answers.get(q) or {}).get("probabilities") or {})
+            continue
+        a = answers.get(q) or {}
         probs = a.get("probabilities") or {}
         if isinstance(probs, list):  # [{"option": .., "probability": ..}]
             probs = {x.get("option") or x.get("label"): x.get("probability") for x in probs}
@@ -207,20 +229,13 @@ def _parse_choice_answers(d):
 def answer_grayson(text):
     key = os.environ["GRAYSON_API_KEY"]
     body = {"model": "grayson-1", "data": {"case_packet": text},
-            "questions": {q: {"type": "choice", "instructions": s["instructions"], "criteria": s["criteria"]}
-                          for q, s in QUESTIONS.items()}}
+            "questions": {q: {"type": "multi_choice" if s.get("multi") else "choice", "instructions": s["instructions"],
+                              "criteria": s["criteria"]} for q, s in QUESTIONS.items()}}
     req = Request("https://api.finic.ai/v1/ask", data=json.dumps(body).encode(),
                   headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
                            "User-Agent": "fraud-arena/0.1"})
     d = _post_with_backoff(req)
-    out = {}
-    for q, spec in QUESTIONS.items():
-        a = (d.get("answers") or {}).get(q) or {}
-        probs = a.get("probabilities") or {}
-        if isinstance(probs, list):  # [{"option": .., "probability": ..}]
-            probs = {x.get("option") or x.get("label"): x.get("probability") for x in probs}
-        out[q] = _normalize(probs, spec["criteria"])
-    return out, 0.0
+    return _parse_choice_answers(d), 0.0
 
 
 def play(player, case_dir):
@@ -250,9 +265,15 @@ def score(keys, results):
         k = keys[cid]
         y = 1 if k["disposition"] == "fraud" else 0
         p = min(max(r["answer"]["disposition"]["fraud"], 1e-4), 1 - 1e-4)
-        typ = max(r["answer"]["typology"], key=r["answer"]["typology"].get)
+        tp = r["answer"]["typology"]
+        typ = max(tp, key=tp.get)
+        true_set = set(k.get("typologies") or ([k["typology"]] if y else []))
+        pred_set = {o for o, v in tp.items() if v >= 0.5}
+        set_f1 = (2 * len(true_set & pred_set) / (len(true_set) + len(pred_set))) if (true_set or pred_set) else 1.0
         role = max(r["answer"]["customer_role"], key=r["answer"]["customer_role"].get)
-        rows.append({"case_id": cid, "y": y, "p": p, "typology_ok": typ == k["typology"] if y else None,
+        rows.append({"case_id": cid, "y": y, "p": p, "typology_ok": (typ in true_set) if y else None,
+                     "typology_set_f1": set_f1 if y else None, "typology_probs": tp if y else None,
+                     "true_typologies": sorted(true_set) if y else None,
                      "role_ok": role == k["customer_role"],
                      "p_true_typology": r["answer"]["typology"].get(k["typology"], 0.0)})
     n = len(rows)
@@ -273,5 +294,27 @@ def score(keys, results):
             "brier": round(sum((x["p"] - x["y"]) ** 2 for x in rows) / n, 3),
             "ece": round(ece, 3),
             "typology_acc_on_fraud": round(sum(bool(x["typology_ok"]) for x in fraud) / len(fraud), 3) if fraud else None,
+            "typology_set_f1": round(sum(x["typology_set_f1"] for x in fraud) / len(fraud), 3) if fraud else None,
+            "typology_macro_ap": _macro_ap(fraud),
             "role_acc": round(sum(x["role_ok"] for x in rows) / n, 3),
             "rows": rows}
+
+
+def _macro_ap(fraud):
+    """Average precision per typology over the fraud cases (does the model rank cases of this type above the
+    others?), averaged over typologies with at least 3 cases."""
+    if not fraud:
+        return None
+    aps = []
+    for t in TYPOLOGIES:
+        ys = [(x["typology_probs"].get(t, 0.0), t in x["true_typologies"]) for x in fraud]
+        pos = sum(y for _, y in ys)
+        if pos < 3:
+            continue
+        tp, ap = 0, 0.0
+        for i, (_, y) in enumerate(sorted(ys, key=lambda z: -z[0]), 1):
+            if y:
+                tp += 1
+                ap += tp / i
+        aps.append(ap / pos)
+    return round(sum(aps) / len(aps), 3) if aps else None
