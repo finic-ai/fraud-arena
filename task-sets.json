@@ -1,0 +1,25 @@
+{
+ "_doc": "Named seed sets for the investigation tasks (docs/tasks.md). Every set is public: dev is for development and published examples; an official set is the season's leaderboard set, chosen per season, with answers published after the season. All sets use the same world, scale and case counts.",
+ "world": {
+  "roots": 8000,
+  "days": 120
+ },
+ "cases": {
+  "alerts": 450,
+  "incidents": 12,
+  "fp": 4,
+  "fraud_share": 0.4,
+  "builds_per_group": 2
+ },
+ "sets": {
+  "dev": [
+   11,
+   12
+  ],
+  "official-2027s1": [
+   201,
+   202,
+   203
+  ]
+ }
+}
