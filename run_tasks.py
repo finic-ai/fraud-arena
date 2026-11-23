@@ -167,7 +167,7 @@ def cmd_run(a):
                                write=WRITE[h], finish=FINISH[h])
         if h == "msa":  # the benchmark harness: mini-SWE-agent over OpenRouter
             r = play_turn(a.model, work, bin_dir, "casefile", prompt, out / a.task / cid / f"trial-{t}.traj.json",
-                          step_limit=max_turns)
+                          step_limit=max_turns, require="casefile submit")
         else:  # Claude Code, for smoke tests
             r = claude_turn(a.model, work, bin_dir, prompt, out / a.task / cid / f"trial-{t}.claude.json", max_turns)
         r["submitted"] = (work / "answer.json").exists()

@@ -40,6 +40,22 @@ Only these commands work:
 - ending your turn: `echo {done}` (alone, as its own command)
 Anything else is refused. Each command runs fresh in your workspace."""
 
+SYSTEM_TOOLS = """You are a player in Fraud Arena, a benchmark. You act through the `bash` tool in a restricted shell.
+
+Only these commands work:
+- `{cli} ...` (your tool; start with `{cli} --help` or the commands named in your task)
+- writing a file under drafts/ with a heredoc:
+  cat <<'EOF' > drafts/NAME
+  ...file content...
+  EOF
+- reading one back: `cat drafts/NAME`
+- ending your turn: `echo {done}` (alone, as its own command)
+Anything else is refused. Each command runs fresh in your workspace. Think briefly before each tool call."""
+
+INSTANCE_TOOLS = """{{task}}
+
+You have at most {{step_limit}} commands this turn. When you have finished, end by running `echo """ + DONE + """`."""
+
 INSTANCE = """{{task}}
 
 You have at most {{step_limit}} commands this turn. When you have finished, end with:
@@ -54,9 +70,11 @@ HEREDOC = re.compile(r"^cat\s+<<\s*'?(\w+)'?\s*>\s*(drafts/[\w.\-]+)\s*\n(.*)\n\
 class RestrictedEnvironment:
     """Runs only the player's own command, drafts/ heredocs, `cat drafts/...` and the end-of-turn echo."""
 
-    def __init__(self, work, bin_dir, cli, timeout=600, step_limit=0, warn_at=5):
+    def __init__(self, work, bin_dir, cli, timeout=600, step_limit=0, warn_at=5, require=None):
         self.work, self.bin_dir, self.cli, self.timeout = Path(work), Path(bin_dir), cli, timeout
         self.step_limit, self.warn_at = step_limit, warn_at
+        # A command (e.g. "casefile submit") that must have succeeded before the turn can end.
+        self.require, self.required_done = require, require is None
         self.commands = []
         keep = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM")
         self.env = {k: v for k, v in os.environ.items() if k in keep}
@@ -76,6 +94,9 @@ class RestrictedEnvironment:
         command = action.get("command", "").strip()
         self.commands.append(command)
         if command == f"echo {DONE}":
+            if not self.required_done:
+                return self._out(f"refused: you haven't run `{self.require} ...` successfully yet. Submit your answer "
+                                 f"first, then end the turn.", 1)
             raise Submitted({"role": "exit", "content": "", "extra": {"exit_status": "Submitted", "submission": ""}})
         m = HEREDOC.match(command)
         if m:
@@ -99,6 +120,8 @@ class RestrictedEnvironment:
         try:
             p = subprocess.run([str(self.bin_dir / self.cli), *parts[1:]], cwd=self.work, env=self.env,
                                capture_output=True, text=True, timeout=timeout or self.timeout)
+            if self.require and p.returncode == 0 and " ".join(parts).startswith(self.require):
+                self.required_done = True
             return self._out((p.stdout + p.stderr)[-20000:], p.returncode)
         except subprocess.TimeoutExpired:
             return self._out("the command timed out", -1)
@@ -114,26 +137,56 @@ class RestrictedEnvironment:
         return {"info": {"config": {"environment_type": "arena.player.RestrictedEnvironment", "cli": self.cli}}}
 
 
+ONE_COMMAND = ("Format error: reply with a short THOUGHT and exactly ONE command in a single ```mswea_bash_command "
+               "block. Don't write tool-call markup (<invoke>, <function_calls>) and don't write several commands or "
+               "their outputs; you'll see the output after each command.")
+
+
 def make_model(spec):
-    """`openrouter:<model id>` (any model, including Claude, through OpenRouter)."""
-    from minisweagent.models.openrouter_textbased_model import OpenRouterTextbasedModel
+    """`openrouter:<model id>`: native tool calling (the `bash` tool), the default; `openrouter:<model id>:text` for
+    models without tool calling, which write one command per response as text."""
     if not spec.startswith("openrouter:"):
         raise ValueError(f"unknown model spec {spec!r}: use openrouter:<model id>")
-    name = spec.split(":", 1)[1]
+    name = spec.split(":", 1)[1].removesuffix(":text")
+    if spec.endswith(":text"):
+        return _text_model(name)
+    from minisweagent.models.openrouter_model import OpenRouterModel
+    return OpenRouterModel(model_name=name, model_kwargs={"temperature": 0.0}, cost_tracking="ignore_errors",
+                           set_cache_control="default_end" if name.startswith("anthropic/") else None)
+
+
+def _text_model(name):
+    from minisweagent.exceptions import FormatError
+    from minisweagent.models.openrouter_textbased_model import OpenRouterTextbasedModel
+
+    class StrictTextModel(OpenRouterTextbasedModel):
+        """One command per response: some models (e.g. Claude) otherwise write a whole imagined sequence of tool calls
+        in their native markup, and the loop would run only one of them, often the end-of-turn."""
+        def _parse_actions(self, response):
+            content = response["choices"][0]["message"]["content"] or ""
+            if "<invoke" in content or "<function_calls" in content or content.count("```mswea_bash_command") > 1:
+                raise FormatError({"role": "user", "content": ONE_COMMAND,
+                                   "extra": {"interrupt_type": "FormatError", "model_response": content[:2000]}})
+            return super()._parse_actions(response)
+
     # Prompt caching for models that need explicit markers (Anthropic): the loop resends the whole conversation
     # each step, so without it every step pays full price for the history.
     cache = "default_end" if name.startswith("anthropic/") else None
-    return OpenRouterTextbasedModel(model_name=name, model_kwargs={"temperature": 0.0}, cost_tracking="ignore_errors",
+    return StrictTextModel(model_name=name, model_kwargs={"temperature": 0.0}, cost_tracking="ignore_errors",
                                     set_cache_control=cache)
 
 
-def play_turn(spec, work, bin_dir, cli, prompt, log_path, *, step_limit=25, cost_limit=5.0, wall_seconds=1800):
+def play_turn(spec, work, bin_dir, cli, prompt, log_path, *, step_limit=25, cost_limit=5.0, wall_seconds=1800,
+              require=None):
     """One player turn. Returns a summary like the Claude Code runner's: seconds, turns, cost, error, summary."""
     from minisweagent.agents.default import DefaultAgent
-    env = RestrictedEnvironment(work, bin_dir, cli, step_limit=step_limit)
-    agent = DefaultAgent(make_model(spec), env, system_template=SYSTEM.format(cli=cli, done=DONE),
-                         instance_template=INSTANCE, step_limit=step_limit, cost_limit=cost_limit,
-                         wall_time_limit_seconds=wall_seconds, output_path=Path(log_path))
+    env = RestrictedEnvironment(work, bin_dir, cli, step_limit=step_limit, require=require)
+    text = spec.endswith(":text")
+    agent = DefaultAgent(make_model(spec), env,
+                         system_template=(SYSTEM if text else SYSTEM_TOOLS).format(cli=cli, done=DONE),
+                         instance_template=INSTANCE if text else INSTANCE_TOOLS, step_limit=step_limit, cost_limit=cost_limit,
+                         wall_time_limit_seconds=wall_seconds, max_consecutive_format_errors=5,
+                         output_path=Path(log_path))
     started = time.time()
     try:
         result = agent.run(prompt)

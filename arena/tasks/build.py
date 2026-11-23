@@ -123,7 +123,11 @@ def alert_candidates(out, truth):
             continue
         if r["role"] in ("incidental", None):
             continue
-        rel = [i for i in r["involvements"] if relevant(i, a["ts"], T)]
+        if r.get("identity") not in (None, "real") and any(
+                i["first_load"] is not None and i["first_load"] <= T for i in r["involvements"]):
+            rel = r["involvements"]  # the account itself is fraudulent (stolen or made-up identity): every alert is fraud
+        else:
+            rel = [i for i in r["involvements"] if relevant(i, a["ts"], T)]
         if not rel:
             continue  # the customer's fraud doesn't bear on this alert: neither fraud nor a clean benign case
         fraud.append({**a, "case_time": T, "truth": {**r, "involvements": rel}})
