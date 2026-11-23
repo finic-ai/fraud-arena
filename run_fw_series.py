@@ -3,7 +3,7 @@ report mean, worst and best over seeds with a bootstrap interval (FrontierSWE-st
 
     python run_fw_series.py --defender claude:sonnet --attacker claude:opus --seeds 7,8,9,10,11 --out runs/series-NAME
     python run_fw_series.py --summarize runs/series-NAME
-Matches run one after another here (each takes 1.5-2 h); on EC2, start one box per seed and summarize the folder.
+Matches run one after another here (each takes 1.5-2 h); to go faster, run one seed per machine and summarize the folder.
 """
 import argparse, json, random, subprocess, sys
 from pathlib import Path

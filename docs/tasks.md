@@ -1,6 +1,8 @@
-# Fraud Arena investigation tasks (historical, offline)
+# Fraud Arena investigation tasks
 
-Two analyst tasks on a frozen simulation of Runmere's Fraud World, seen from Brindlemark Bank:
+Two analyst tasks on a fixed simulation of
+[Fraud World](https://runmere.finic.ai/public/worlds/wld_01m7gjgv6z5syh222t2g0qsyse), seen from Brindlemark Bank. Each case
+is frozen at a case time: the player sees the bank's data as it stood then.
 
 - **Task A, alert review.** One alerted customer per case. Decide fraud or not, the typology, the customer's role,
   a calibrated confidence and an action.
@@ -8,8 +10,11 @@ Two analyst tasks on a frozen simulation of Runmere's Fraud World, seen from Bri
   (one ring crew running one kind of scheme, or one fraudster's run of victims) or a benign cluster; if real, find
   every Brindlemark customer in it within the window and give each one's role.
 
-Players are headless Claude Code sessions (or the non-LLM baseline) with one tool, `casefile`, which only ever shows the
-bank's own tables as of the case time. Answers are graded against the simulator's truth.
+Agentic players (mini-SWE-agent over OpenRouter, or the non-LLM baseline) have one tool, `casefile`, which only ever
+shows the bank's own tables as of the case time. Answers are graded against the simulator's truth.
+
+The **alert triage** board on fraudarena.com uses the same alert cases in a decision format instead: every player gets
+the same complete case packet and answers in one call, with no tools (see Alert triage below).
 
 ## Format
 
@@ -19,8 +24,9 @@ The benchmark is fully public, in the style of tau-bench and FrontierSWE:
   published sets, and example traces (every `casefile` command and the final answer) from runs.
 - **Seed sets** (`task-sets.json`): `dev` (seeds 11, 12) for development, examples and answers; one `official-<season>`
   set per season (e.g. `official-2027s1`: 201, 202, 203), the leaderboard set, chosen per season, with its answers
-  published after the season. Every set uses the same world, scale (8000 roots, 120 days) and case counts (40 alerts,
-  12 incidents of which up to 4 are benign clusters). A new season is new seeds of the same world.
+  published after the season. Every set uses the same world, scale (8000 roots, 120 days) and case counts (up to 450
+  alerts with a 40% fraud share, 12 incidents of which up to 4 are benign clusters). A new season is new seeds of the
+  same world.
 - **k trials** per case (`--trials K`, a fresh workspace each), scored as mean@K with the worst@K / best@K range,
   pass^K on the verdict, and a 95% bootstrap confidence interval over cases (Scoring below).
 - **Harbor task folders** (`export-harbor`): each case as a self-contained task (instruction, environment with the
@@ -28,9 +34,9 @@ The benchmark is fully public, in the style of tau-bench and FrontierSWE:
 
 ```bash
 python run_tasks.py build --split dev --seed 11 --out cases/dev-s11      # ~5 min simulation + ~30 s build
-python run_tasks.py run --task alert --cases cases/dev-s11 --model sonnet --trials 3 --out runs/dev-s11-sonnet
+python run_tasks.py run --task alert --cases cases/dev-s11 --model openrouter:<model id> --trials 3 --out runs/dev-s11-m
 python run_tasks.py run --task incident --cases cases/dev-s11 --model baseline --out runs/dev-s11-baseline
-python run_tasks.py score --runs runs/dev-s11-sonnet runs/dev-s11-baseline
+python run_tasks.py score --runs runs/dev-s11-m runs/dev-s11-baseline
 python run_tasks.py leaderboard --runs runs/* --out site-data/leaderboard.json
 python run_tasks.py publish --split dev --cases cases/dev-s11 cases/dev-s12 --runs runs/* \
     --examples dev-s11/A006,dev-s11/B002 --out site-data
@@ -41,18 +47,16 @@ python tools/check_domains.py cases/dev-s11 cases/dev-s12
 `build` checks that the seed belongs to the named set (`--allow-any-seed` for scratch builds) and reuses an existing
 simulation in `cases/NAME/truth/` when seed/roots/days match (`--resimulate` to run it again). Builds are
 deterministic for a given simulation. `run` copies each case workspace into the run folder once per trial, runs four
-in parallel (`--parallel`), and keeps `answer.json`, the command log and the Claude transcript per trial.
+in parallel (`--parallel`), and keeps `answer.json`, the command log and the agent's trajectory per trial.
 
 ## World
 
-`worlds/fraud-world-tasks.yaml` is `worlds/fraud-world-arena.yaml` (the 1v1 world) with two differences:
-`fraud_density` is back at the world default of 0.62, so independent fraudsters (ATO, card, scams, first-party,
-mules...) act alongside the ten ring crews (R1-R10); and ring R1 runs a direct-deposit sign-up bonus churn: each
-identity opens a checking account, receives two or three biweekly payroll-looking credits from one of the crew's
-rotating fake employers (some under real small employers' names), collects the sign-up bonus, and the balance leaves
-by ACH within days to one of the crew's collection accounts at Dovrex or a prepaid card; referrals are occasional and
-the openers use their own varied email addresses. No defender or attacker policy is deployed: the bank runs its
-built-in rules and the rings their scripts.
+The tasks use Fraud World as published on Runmere's hub, at its default settings: independent fraudsters (account
+takeover, card fraud, scams, first-party fraud, mules...) act alongside the ten ring crews (R1-R10). Ring R1 runs a
+direct-deposit sign-up bonus churn: each identity opens a checking account, receives two or three biweekly
+payroll-looking credits from one of the crew's rotating fake employers, collects the sign-up bonus, and the balance
+leaves by ACH within days to one of the crew's collection accounts or a prepaid card. No defender or attacker policy is
+deployed: the bank runs its built-in rules and the rings their scripts.
 
 ## Layout
 
@@ -66,7 +70,7 @@ cases/NAME/alert/A001/ ...         workspaces: case.json, brief.md, notes.md, dr
 cases/NAME/incident/B001/ ...
 cases/NAME/index.json              split, seed, case list with template ids, build summary
 runs/NAME/<task>/<CASE>/trial-<k>/ the player's copy of the workspace: answer.json, log.jsonl (every command)
-runs/NAME/<task>/<CASE>/trial-<k>.claude.json   Claude Code's JSON result (turns, cost, final message)
+runs/NAME/<task>/<CASE>/trial-<k>.traj.json     the agent's trajectory (turns, cost, final message)
 runs/NAME/<task>/run.json, score.json
 site-data/                         leaderboard.json, alert.json, incident.json (publish)
 harbor/NAME/<set>-<case>/          Harbor task folders (export-harbor)
@@ -169,7 +173,7 @@ An alert fires at the triggering row's `LOAD_TS`; the case time is 24 h later.
 loaded by then. Benign alerts: customers the world never touched at all (no fraud involvement, no ring marks, real
 identity). Fraud cases are spread over typologies; benign cases are drawn first from the same monitors as the fraud
 ones (look-alikes, e.g. honest "mistaken fraud claim" disputes next to real card compromise), one case per customer.
-The fraud share (default 45%) is stated in every brief.
+Cases are sampled at a 40% fraud share; every brief states the base rate of a real bank's alert queue (about 10%).
 
 **Answer**: `disposition`, `typology` (ato, scam_victim, mule, synthetic_identity, first_party, card_compromise,
 promo_abuse, check_fraud, other, none), `customer_role` (perpetrator, victim, mule, legitimate), `confidence`,
@@ -264,11 +268,12 @@ Every command is appended to the workspace's `log.jsonl` (args, ok/error, second
 
 ## Players
 
-- **Claude**: `claude -p <brief + how-to> --model M --tools Bash,Write,Read --allowedTools "Bash(casefile:*)"
-  "Edit(drafts/**)" "Read(drafts/**)" --strict-mcp-config --mcp-config <empty> --setting-sources project
-  --no-session-persistence --max-turns N --output-format json`, cwd = the workspace, `PATH` prefixed with a folder
-  holding the workspace's `casefile` wrapper. 30 turns for alerts, 60 for incidents, 20 min timeout. If
-  `CLAUDE_CODE_OAUTH_TOKEN` is not set, it is read from `~/.claude-token` (or `$CLAUDE_TOKEN_FILE`).
+- **Models** (`--model openrouter:<model id>`): mini-SWE-agent's agent loop over OpenRouter (`arena/player.py`), with
+  native tool calling (one `bash` tool) or, with an `:text` suffix, one command per response as text. The player's
+  shell runs in the workspace with `casefile` on its `PATH`; the answer is accepted only through `casefile submit`.
+  30 steps for alerts, 60 for incidents (`--max-turns`). `OPENROUTER_API_KEY` must be set.
+- **Claude Code** (`--model claude:<model>`, for smoke tests): a headless `claude -p` session restricted to
+  `Bash(casefile:*)` and Write/Edit/Read under `drafts/`, with no MCP servers, no user settings and no saved session.
 - **Baseline** (`baseline.py`): hand-set points on as-of signals (account age, application risk, referrals and
   bonuses, risky logins, profile changes, disputes, claims, unauthorized returns, P2P fan-in, wires by older
   customers, near-threshold cash, tiny card auths). Incidents: the seed's risk decides the verdict; expansion is one
@@ -284,18 +289,24 @@ Every command is appended to the workspace's `log.jsonl` (args, ok/error, second
   clusters; mule-recruit and scam-victim groups are small.
 - Truth roles are rule-derived from event actors and account control; witting vs unwitting mules are not separated.
 
+## Alert triage (decision format, `arena/tasks/decide.py`)
+
+The alert triage board uses the alert cases without tools. `tools/run_decide.py` builds one case packet per alert (the
+alert, the customer's profile and timeline as of the case time, and every link kind with how many customers share
+each key; identical for every player) and asks three fixed questions with probabilities: disposition (fraud or not),
+typology (any number may apply) and the customer's role.
+
+```bash
+python tools/run_decide.py cases/dev-s11 cases/dev-s12 --player openrouter:<model id> --out m.json
+python tools/leaderboard.py cases/dev-s11 cases/dev-s12 --results m=m.json --json board.json
+```
+
+Players: `baseline` (a heuristic floor), `openrouter:<model id>`, `grayson` (Finic's Grayson decision API,
+`GRAYSON_API_KEY`) and `jev` (TypeSafe's Jev through OpenRouter). The board ranks players by PR-AUC on the fraud
+question with benign cases reweighted to a 10% alert fraud rate, and reports ROC-AUC, log loss, Brier score, precision
+at 80% recall, and typology and role accuracy, each with a bootstrap 95% CI (cases resampled within each seed).
+
 ## Results
 
-Dev set (seeds 11 and 12, 8000 roots, 120 days): 80 alert cases (45% fraud) and 21 incident cases (13 real, of which
-2 verdict-only; 8 benign clusters). Real incidents: R1 bonus churning x2, R2 x2, R9 x2, R5, R6, R7, R10 refund
-service, R10 farmed accounts, R4 mule recruits, one independent card tester. Unreachable members per real incident:
-0-5 (neutral).
-
-| Player | Task | Cases | K | mean@K | worst@K / best@K | pass^K (verdict) | 95% CI | pooled |
-|---|---|---|---|---|---|---|---|---|
-| baseline | alert | 80 | 1 | 0.573 | 0.573 / 0.573 | 0.61 | 0.47-0.67 | accuracy 0.60 / 0.63, fraud F1 0.53 / 0.62, Brier 0.24 / 0.23 (seed 11 / 12) |
-| baseline | incident | 21 | 1 | 0.509 | 0.509 / 0.509 | 0.67 | 0.33-0.68 | verdict 0.67, member F1 0.07 / 0.00, benign verdicts 1.0 |
-| Sonnet (smoke) | alert | 2 | 2 | 0.50 | 0.50 / 0.50 | 0.50 | - | the fraud case missed in both trials, the benign one right |
-| Sonnet (smoke) | incident | 2 | 2 | 0.62 | 0.59 / 0.65 | 1.00 | 0.40-0.84 | verdicts right, member F1 0.45, typology 0.5 |
-
-The Sonnet rows are a smoke test of the runner and scoring (4 cases, $0.67), not a measurement.
+Leaderboards for the current season are on [fraudarena.com](https://fraudarena.com), with every case's inputs and
+example traces; answer keys of an official set are published after its season.

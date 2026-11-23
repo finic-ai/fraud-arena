@@ -1,4 +1,4 @@
-"""Score weights and institutions, from the v0 harness (fraud_arena/config.py on feat/defender-harness)."""
+"""Score weights and institutions of the 1v1 match."""
 from dataclasses import dataclass
 
 INSTITUTIONS = {

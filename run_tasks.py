@@ -1,16 +1,17 @@
 """Fraud Arena historical investigation tasks: alert review (A) and incident investigation (B).
 
     python run_tasks.py build --split dev --seed 11 --out cases/dev-s11
-    python run_tasks.py run --task alert --cases cases/dev-s11 --model sonnet --n 12 --trials 3 --out runs/dev-s11-sonnet
+    python run_tasks.py run --task alert --cases cases/dev-s11 --model openrouter:<model id> --n 12 --trials 3 --out runs/dev-s11-m
     python run_tasks.py run --task incident --cases cases/dev-s11 --model baseline --out runs/dev-s11-baseline
-    python run_tasks.py score --cases cases/dev-s11 --runs runs/dev-s11-sonnet runs/dev-s11-baseline
+    python run_tasks.py score --runs runs/dev-s11-m runs/dev-s11-baseline
     python run_tasks.py leaderboard --runs runs/* --out site-data/leaderboard.json
     python run_tasks.py publish --split dev --cases cases/dev-s11 cases/dev-s12 --runs runs/* --examples dev-s11/A001 --out site-data
     python run_tasks.py export-harbor --cases cases/dev-s11 --out harbor/dev-s11 [--ids A001,B002]
 
-Seed sets (splits) are in task-sets.json. A Claude player is a headless Claude Code session per case and trial,
-restricted to its own `casefile` command (Bash(casefile:*)), Write/Edit/Read under drafts/, no MCP servers, no user
-settings or hooks, and no session saved. `--model baseline` runs the non-LLM heuristic instead. See docs/tasks.md.
+Seed sets (splits) are in task-sets.json. A model player (`openrouter:<model id>`) is mini-SWE-agent over OpenRouter
+with its own `casefile` command; `claude:<model>` runs a headless Claude Code session instead (for smoke tests),
+restricted to Bash(casefile:*) and Write/Edit/Read under drafts/. `--model baseline` runs the non-LLM heuristic.
+See docs/tasks.md.
 """
 
 import argparse
