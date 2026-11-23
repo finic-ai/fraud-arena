@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from .decide import packet, _normalize
+from .decide import packet, _normalize, _post_with_backoff
 from .schema import REAL_WORLD_ALERT_FRAUD_RATE
 
 FAMILY_OF = {
@@ -111,8 +111,7 @@ def ask(player, case_dir):
                 "questions": {q: {"type": "choice", "instructions": t, "criteria": YES_NO} for q, (t, _) in qs.items()}}
         req = Request(url, data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key,
                       "Content-Type": "application/json", "User-Agent": "fraud-arena/0.1"})
-        with urlopen(req, timeout=180) as r:
-            d = json.load(r)
+        d = _post_with_backoff(req)
         out = {q: _normalize(((d.get("answers") or {}).get(q) or {}).get("probabilities") or {}, YES_NO)["yes"]
                for q in qs}
         return out, float((d.get("usage") or {}).get("cost") or 0.0)

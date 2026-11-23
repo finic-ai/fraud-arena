@@ -108,7 +108,9 @@ class Truth:
                         "n_rows": len(rs), "tables": sorted({r[3] for r in rs}),
                         "events": sorted({e for e, _ in evs}),
                         "fraudster_acted": any(a == "fraudster" for _, a in evs),
-                        "fraudster": next((r[9] for r in rs if r[5] == "fraudster"), None)})
+                        "fraudster": next((r[9] for r in rs if r[5] == "fraudster"), None),
+                        # per row: (event time, load time, event, actor type): what the bank could see, and when
+                        "rows": [(r[6], r[7], r[4], r[5]) for r in rs]})
         return out
 
     def _ring_at(self, cust, ts):

@@ -24,6 +24,7 @@ from collections import Counter, defaultdict
 from datetime import timedelta
 from pathlib import Path
 
+from .schema import PAYING_EVENTS  # noqa: E402
 from .casedb import open_asof
 from .links import build_keys
 from .monitors import MONITOR_DESCRIPTIONS, run_monitors
@@ -70,22 +71,58 @@ def iso(ts):
 
 # --- alert cases ------------------------------------------------------------------------------------------------------
 
+# An alert is labeled fraud only when the customer's fraud is relevant to it: active in the RELEVANCE window before the
+# alert, with at least MIN_VISIBLE of its records at the bank by the case time (a scam victim's payment among them).
+# A customer whose only fraud is unrelated, ancient or invisible is left out of the alert set, labeled neither way.
+RELEVANCE = __import__("datetime").timedelta(days=30)
+MIN_VISIBLE = 2
+
+
+def relevant(inv, alert_ts, case_time):
+    if not inv["role"] or inv["start"] > case_time or inv["end"] < alert_ts - RELEVANCE:
+        return False
+    seen = [r for r in inv["rows"] if r[1] is not None and r[1] <= case_time]
+    if len(seen) < MIN_VISIBLE:
+        return False
+    if inv["family"] == "scam_victim" and inv["role"] == "victim":
+        return any(ev in PAYING_EVENTS and actor == "person" for _, _, ev, actor in seen)
+    return True
+
+
+def benign_artifacts(out):
+    """Customers whose records carry fraud-like artifacts the world generates for ordinary customers (until the world
+    is fixed): a phone shared by 4+ customers, a hosting IP shared by 5+, a disposable email, or a scam-warning
+    callback note without a scam. Benign alerts on them are left out, as no analyst could defend 'benign' there."""
+    import duckdb
+    b = Path(out) / "bank"
+    q = lambda sql: {r[0] for r in duckdb.sql(sql).fetchall()}  # noqa: E731
+    bad = q(f"""SELECT CUST_ID FROM '{b}/CUSTOMERS.parquet' WHERE PHONE IN (
+                SELECT PHONE FROM '{b}/CUSTOMERS.parquet' GROUP BY 1 HAVING count(DISTINCT CUST_ID) >= 4)""")
+    bad |= q(f"""SELECT DISTINCT CUST_ID FROM '{b}/LOGINS.parquet' WHERE IP_TYPE = 'HOSTING' AND IP_ADDR IN (
+                 SELECT IP_ADDR FROM '{b}/LOGINS.parquet' GROUP BY 1 HAVING count(DISTINCT CUST_ID) >= 5)""")
+    bad |= q(f"""SELECT CUST_ID FROM '{b}/CUSTOMERS.parquet'
+                 WHERE lower(split_part(EMAIL, '@', 2)) IN ('guerrillamail.com', '10minutemail.com', 'tempbox.example')""")
+    bad |= q(f"""SELECT DISTINCT CUST_ID FROM '{b}/CALLS.parquet' WHERE NOTES ILIKE '%scam risk%' OR NOTES ILIKE '%insisted%'""")
+    return bad
+
+
 def alert_candidates(out, truth):
     touched = truth.ever_touched()
+    artifacts = benign_artifacts(out)
     fraud, benign = [], []
     for a in run_monitors(out):
         T = a["ts"] + ALERT_DELAY
         r = truth.customer(a["cust"], as_of=T)
         if r is None:
-            if a["cust"] not in touched:
+            if a["cust"] not in touched and a["cust"] not in artifacts:
                 benign.append({**a, "case_time": T, "truth": None})
             continue
         if r["role"] in ("incidental", None):
             continue
-        # answerability: some row of the customer's fraud must have reached the bank by the case time
-        if not any(i["first_load"] <= T for i in r["involvements"] if i["role"] or i["part"] == "cover"):
-            continue
-        fraud.append({**a, "case_time": T, "truth": r})
+        rel = [i for i in r["involvements"] if relevant(i, a["ts"], T)]
+        if not rel:
+            continue  # the customer's fraud doesn't bear on this alert: neither fraud nor a clean benign case
+        fraud.append({**a, "case_time": T, "truth": {**r, "involvements": rel}})
     return fraud, benign
 
 
@@ -143,7 +180,7 @@ def alert_key(a):
                 "scenario": None}
     return {"disposition": "fraud", "typology": r["typology"], "customer_role": r["role"], "ring": r["ring"],
             "scenario": r["scenario"], "identity": r["identity"],
-            "involvements": [{k: (iso(v) if hasattr(v, "isoformat") else v) for k, v in i.items()}
+            "involvements": [{k: (iso(v) if hasattr(v, "isoformat") else v) for k, v in i.items() if k != "rows"}
                              for i in r["involvements"]]}
 
 

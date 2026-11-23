@@ -166,6 +166,20 @@ def answer_claude(model, text):
     return {q: _normalize(ans.get(q) or {}, QUESTIONS[q]["criteria"]) for q in QUESTIONS}, float(d.get("total_cost_usd") or 0)
 
 
+def _post_with_backoff(req, tries=8):
+    """POST and parse JSON, waiting and retrying on 429 (rate limit) and 5xx."""
+    import time
+    from urllib.error import HTTPError
+    for i in range(tries):
+        try:
+            with urlopen(req, timeout=180) as r:
+                return json.load(r)
+        except HTTPError as e:
+            if e.code not in (429, 500, 502, 503, 504) or i == tries - 1:
+                raise
+            time.sleep(min(60, 2 ** i))
+
+
 def answer_jev(text, model="typesafe/jev-1.14"):
     """Jev (TypeSafe's decision model) through OpenRouter's System One API: the same state + choice questions."""
     key = os.environ["OPENROUTER_API_KEY"]
@@ -198,8 +212,7 @@ def answer_grayson(text):
     req = Request("https://api.finic.ai/v1/ask", data=json.dumps(body).encode(),
                   headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
                            "User-Agent": "fraud-arena/0.1"})
-    with urlopen(req, timeout=120) as r:
-        d = json.load(r)
+    d = _post_with_backoff(req)
     out = {}
     for q, spec in QUESTIONS.items():
         a = (d.get("answers") or {}).get(q) or {}
