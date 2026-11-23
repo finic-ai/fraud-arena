@@ -119,6 +119,12 @@ def window_score(truth: Path, accounts_institution: Path, *, institution: str, r
         else:
             good += 1
             friction += weights.action_cost(action, amount)
+    # Review capacity: every review (good or fraud) uses analyst time; beyond the day's capacity it costs overtime.
+    for (n,) in c.execute(f"""
+        select count(*) from '{T}/decisions.parquet' d
+        where d.role = ? and d.action = 'review' and d.time >= timestamptz '{start}' and d.time < timestamptz '{end}'
+        group by date_trunc('day', d.time)""", [role]).fetchall():
+        friction += max(0, n - weights.review_capacity_per_day) * weights.review_overtime
     return WindowScore(own, friction, good, fraud, other, by_scenario, float(mule.get(institution) or 0.0))
 
 

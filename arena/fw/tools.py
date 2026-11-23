@@ -24,7 +24,17 @@ def connect(work):
 NUMERIC = ("money", "int", "float", "bool")
 
 
-def fit(work, kind, decision, features, *, label="fraud_known", where=None, depth=3, trees=60, balanced=False):
+# What a caught fraud is worth when the decision has no amount (a stated assumption; --fraud-value overrides it).
+FRAUD_VALUE = {"brind_login_check": 300.0, "brind_account_open_review": 500.0, "brind_business_open_review": 500.0}
+# The action a model cutoff would take, per decision (the cost-aware report prices it).
+DEFAULT_ACTION = {"brind_card_auth": "decline", "brind_login_check": "step_up", "brind_payment_hold": "hold",
+                  "brind_account_open_review": "review", "brind_business_open_review": "review",
+                  "brind_ach_debit_review": "return_debit", "brind_ach_push": "hold", "brind_ach_hold": "hold",
+                  "brind_wire_release": "hold", "brind_consumer_wire": "hold", "brind_txn_monitoring": "raise_alert"}
+
+
+def fit(work, kind, decision, features, *, label="fraud_known", where=None, depth=3, trees=60, balanced=False,
+        action=None, fraud_value=None, return_best=False):
     """Fit a model on the case table of `decision` and return (report text, model block). The split is by time:
     the last quarter of cases is the test set."""
     import numpy as np
@@ -41,10 +51,12 @@ def fit(work, kind, decision, features, *, label="fraud_known", where=None, dept
     db = connect(work)
     cond = f"WHERE {where}" if where else ""
     cols = ", ".join(f'"{f}"' for f in features)
-    rows = db.execute(f'SELECT {cols}, {label}::int AS y, ts FROM "{table}" {cond} ORDER BY ts').fetchall()
+    amount_col = '"amount"' if "amount" in kinds else "NULL"
+    rows = db.execute(f'SELECT {cols}, {amount_col} AS _amt, {label}::int AS y, ts FROM "{table}" {cond} ORDER BY ts').fetchall()
     if len(rows) < 50:
         raise ValueError(f"only {len(rows)} labeled cases: too few to fit")
-    X = np.array([[np.nan if v is None else float(v) for v in r[:-2]] for r in rows], dtype=float)
+    X = np.array([[np.nan if v is None else float(v) for v in r[:-3]] for r in rows], dtype=float)
+    amt = np.array([np.nan if r[-3] is None else float(r[-3]) for r in rows], dtype=float)
     y = np.array([r[-2] for r in rows], dtype=int)
     cut = int(len(rows) * 0.75)
     Xtr, ytr, Xte, yte = X[:cut], y[:cut], X[cut:], y[cut:]
@@ -92,6 +104,34 @@ def fit(work, kind, decision, features, *, label="fraud_known", where=None, dept
                           f"catching {tp} of {int(yte.sum())} fraud ({int(flag.sum()) - tp} good cases flagged)")
         report.append("Scores are calibrated to the base rate, so useful cutoffs are often small: pick one from the "
                       "lines above, e.g. score.NAME > <cutoff>.")
+        # Cost-aware: the net dollars each cutoff would have made on the test cases, priced like the match's score.
+        from arena.fw.config import ScoreWeights
+        wts = ScoreWeights()
+        act = action or DEFAULT_ACTION.get(full, "decline")
+        fv = float(fraud_value) if fraud_value is not None else FRAUD_VALUE.get(full)
+        ate = amt[cut:]
+        value = np.where(np.isnan(ate), fv if fv is not None else 0.0, ate)
+        cost = np.array([wts.action_cost(act, 0.0 if np.isnan(a) else a) for a in ate])
+        report.append(f"Net dollars on the test cases if your rule took action {act!r} above each cutoff (caught fraud "
+                      f"counted at {'its amount' if fv is None else f'its amount, or ${fv:.0f} without one'}; each good "
+                      f"case flagged costs the match's friction for {act!r}):")
+        best = None
+        for share in (0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2):
+            t = float(np.quantile(p, 1 - share))
+            flag = p >= t
+            net = float((value * (flag & (yte == 1))).sum() - (cost * (flag & (yte == 0))).sum())
+            report.append(f"  score >= {t:.4g} (top {share:.1%}): net ${net:,.0f}")
+            if best is None or net > best[1]:
+                best = (t, net, share)
+        if best and best[1] > 0:
+            report.append(f"Best on the test cases: score >= {best[0]:.4g} (net ${best[1]:,.0f}). Test cases are the "
+                          f"last quarter of history; the live week can differ.")
+        else:
+            report.append("No cutoff made money on the test cases: friction outweighs the fraud caught here.")
+        model["_best"] = best
     else:
         report.append("the test part has no known fraud (or only fraud): no test metrics")
+    best = model.pop("_best", None)
+    if return_best:
+        return "\n".join(report), model, best
     return "\n".join(report), model

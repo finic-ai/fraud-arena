@@ -19,6 +19,10 @@ class ScoreWeights:
     step_up: float = 0.50
     hold: float = 2.0
     review: float = 15.0
+    # The analyst team's capacity for operational reviews (the analyst role's reviews_per_day). Raised alerts already
+    # wait in the analysts' queue; `review` actions beyond the day's capacity are worked as overtime or outsourced.
+    review_capacity_per_day: int = 10
+    review_overtime: float = 75.0
     alert: float = 8.0
     block: float = 25.0
     close_account: float = 200.0

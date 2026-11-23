@@ -29,7 +29,7 @@ def world_bits(world_path, role, builtin_policy):
     return builtin, gates
 
 
-def compose(policy, builtin, gates, *, log=True):
+def compose(policy, builtin, gates, *, log=True, lists=None):
     """The deployment for `policy` (the defender's JSON: rules and optional models)."""
     policy = policy or {}
     own = list(policy.get("rules") or [])
@@ -45,9 +45,13 @@ def compose(policy, builtin, gates, *, log=True):
     if policy.get("models"):
         dep["models"] = policy["models"]
     outside = {LOG: {"type": "number"}} if log else {}
+    for name in lists or {}:  # the defender's lists, answered by the harness at decision time
+        outside[f"list_{name}"] = {"type": "number"}
     if outside:
         dep["outside"] = outside
         reading = {d for d, g in gates.items() if g == "event"} if log else set()
+        if lists:
+            reading |= set(gates)
         dep["external"] = {d: ({} if gates.get(d) == "event" else {"timeout": "1h"}) for d in reading}
     else:
         dep["format"] = 1
