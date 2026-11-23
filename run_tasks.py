@@ -350,7 +350,7 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("--task", choices=["alert", "incident"], required=True)
     r.add_argument("--cases", required=True)
-    r.add_argument("--model", default="sonnet", help="openrouter:<model id> (the benchmark harness, mini-SWE-agent), claude:<model> or a bare Claude model name (Claude Code, for smoke tests), or baseline")
+    r.add_argument("--model", required=True, help="openrouter:<model id> (the benchmark harness, mini-SWE-agent), claude:<model> or a bare Claude model name (Claude Code, for smoke tests), or baseline")
     r.add_argument("--n", type=int, default=0, help="run the first N cases (default all)")
     r.add_argument("--ids", default="", help="comma-separated case ids")
     r.add_argument("--trials", type=int, default=1, help="K: independent trials per case (fresh workspace each)")
