@@ -27,6 +27,10 @@ REPORT_SHARE, REPORT_DAYS = 0.8, (2, 10)
 AGGREGATOR_SAMPLE = 5
 
 
+# An engine that records a deployed policy's cases itself (`record_cases`, `Run.take_cases`) needs no outside decider
+# to log the defender's training data; only a defender's lists still use one.
+NATIVE_CASES = hasattr(runmere.Run, "take_cases") and __import__("os").environ.get("FA_NATIVE_CASES", "1") != "0"
+
 def iso(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
 
@@ -109,9 +113,11 @@ class Match:
             base = runmere.Run.restore(self.world, ckpt, roots)
         else:
             base = self.world.start(seed, 1, roots)
-            base.deploy(ROLE, compose({}, self.builtin, self.gates))
-            base.set_outside(self._outside)
+            base.deploy(ROLE, compose({}, self.builtin, self.gates, native=NATIVE_CASES))
+            if not NATIVE_CASES:
+                base.set_outside(self._outside)
             base.run_until_day(warmup_days)
+            self._take(base)
             history = self.week_cases
             base.undeploy(ROLE)
             base.set_outside(None)
@@ -172,12 +178,34 @@ class Match:
         # The case log the logging rule fills (training data), starting with the warm-up's history.
         self.week_cases, self.all_cases = [], history
         self.last_truth, _ = self._export(base, self.history_truth)
-        self.cand.deploy(ROLE, compose({}, self.builtin, self.gates))
-        self.cand.set_outside(self._outside)
+        self.cand.deploy(ROLE, compose({}, self.builtin, self.gates, native=NATIVE_CASES))
+        if not NATIVE_CASES:
+            self.cand.set_outside(self._outside)
 
     def _outside(self, case, view):
         """Answers the candidate run's outside requests: logs the case (the defender's training data)."""
         return self._answer(case, view, log=True, lists=self.lists)
+
+    def _needs_outside(self):
+        """Whether the candidate's deployment reads outside features: only on an engine without `take_cases` (the
+        logging rule and lists). With native case recording the defender task uses no outside code, and no lists."""
+        return not NATIVE_CASES
+
+    def _take(self, run):
+        """Logs the cases that `run` recorded (`record_cases`), as `_answer` logs them: event gates only, aggregator
+        sign-ins sampled."""
+        if not NATIVE_CASES:
+            return
+        for case in run.take_cases():
+            if case.get("gate") != "event":
+                continue
+            feats = case.get("features") or {}
+            if feats.get("aggregator") and \
+                    int(__import__("hashlib").sha1(str(case.get("key")).encode()).hexdigest(), 16) % 100 >= AGGREGATOR_SAMPLE:
+                continue
+            self.week_cases.append({"key": case.get("key"), "decision": case.get("decision"),
+                                    "time": case.get("time"), "features": feats,
+                                    "identifiers": case.get("identifiers") or {}})
 
     def _answer(self, case, view, *, log, lists=None):
         needs = case.get("needs", [])
@@ -223,9 +251,11 @@ class Match:
                 run.intervene("ring", ring, attr, value)
 
     def _apply(self, run, policy, lists=None):
+        if NATIVE_CASES:  # lists need outside code at decision time, which this task doesn't use
+            lists = None
         self.lists = {n: {"key": l["key"], "set": set(l["values"])} for n, l in (lists or {}).items()}
-        run.deploy(ROLE, compose(policy or {}, self.builtin, self.gates, lists=self.lists))
-        run.set_outside(self._outside)
+        run.deploy(ROLE, compose(policy or {}, self.builtin, self.gates, lists=self.lists, native=NATIVE_CASES))
+        run.set_outside(self._outside if self._needs_outside() else None)
 
     # --- applying the players' choices -------------------------------------------------------------------------
 
@@ -299,11 +329,13 @@ class Match:
 
         def forks():
             trial = week_start.fork()
-            trial.set_outside(self._outside)
+            if self._needs_outside():
+                trial.set_outside(self._outside)
             if self.defender_only:
                 return trial, None
             no_att = week_start.fork()  # the defender's policy against the scripted crews
-            no_att.set_outside(self._quiet_outside(self.deployed))
+            if self._needs_outside():
+                no_att.set_outside(self._quiet_outside(self.deployed))
             self._script_plan(no_att)
             return trial, no_att
 
@@ -329,6 +361,7 @@ class Match:
                 raise next(e for e in again if e)
         if errors[2] or errors[3]:
             raise errors[2] or errors[3]
+        self._take(trial)
         self.cand = trial
         end = iso(self.cand.time)
         self.week += 1

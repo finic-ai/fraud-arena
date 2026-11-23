@@ -18,10 +18,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from arena.fw.match import Match
+from arena.fw.match import NATIVE_CASES, Match
 from arena.player import is_player, play_turn
 
 REPO = Path(__file__).resolve().parent
+
+# Lists the bank checks at decision time need outside code; the defender task has them only on an engine without
+# native case recording (FA_NATIVE_CASES=0).
+LISTS_TOOL = "" if NATIVE_CASES else (
+    " `arena list set` for lists the bank checks at decision time (e.g. devices, accounts or customers tied to"
+    " confirmed fraud), which rules read as outside.list_NAME;")
 
 BRIEFS = {
     "defender": """# You are the DEFENDER at Brindlemark Bank (Fraud Arena)
@@ -49,9 +55,7 @@ never see the ring's plans.
 
 Your tools: `arena rule add/remove/list` for quick rule changes; `arena fit logistic|trees` to train a scoring model on
 the labeled cases (it reports test metrics and the net dollars each cutoff would have made, and with --save adds the
-model to your policy); `arena list set` for lists the bank checks at decision time (e.g. devices, accounts or
-customers tied to confirmed fraud), which rules read as outside.list_NAME; and `arena policy set` for whole policies
-(JSON or YAML).
+model to your policy);{lists_tool} and `arena policy set` for whole policies (JSON or YAML).
 
 What the actions do in this world (they differ a lot in how much fraud they stop):
 - block, reject, decline and return_debit stop the event: the payment, login, authorization or debit doesn't go
@@ -90,6 +94,7 @@ Your data: your own results only (`arena results`): what each crew took from eac
 of each scheme you have run. You never see the bank's rules, alerts or data.
 """,
 }
+BRIEFS["defender"] = BRIEFS["defender"].replace("{lists_tool}", LISTS_TOOL)
 
 TASK = """{brief}
 ## This turn
@@ -114,7 +119,8 @@ def is_ai(who):
 def write_wrapper(bin_dir, work):
     bin_dir.mkdir(parents=True, exist_ok=True)
     w = bin_dir / "arena"
-    w.write_text(f'#!/bin/sh\nPYTHONPATH="{REPO}" exec "{sys.executable}" -m arena.fw.cli "{work}" "$@"\n')
+    no_lists = "ARENA_NO_LISTS=1 " if NATIVE_CASES else ""
+    w.write_text(f'#!/bin/sh\n{no_lists}PYTHONPATH="{REPO}" exec "{sys.executable}" -m arena.fw.cli "{work}" "$@"\n')
     w.chmod(0o700)
 
 

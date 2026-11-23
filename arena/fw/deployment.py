@@ -29,8 +29,12 @@ def world_bits(world_path, role, builtin_policy):
     return builtin, gates
 
 
-def compose(policy, builtin, gates, *, log=True, lists=None):
-    """The deployment for `policy` (the defender's JSON: rules and optional models)."""
+def compose(policy, builtin, gates, *, log=True, lists=None, native=False):
+    """The deployment for `policy` (the defender's JSON: rules and optional models). With `native` (an engine with
+    `Run.take_cases`), the run records the cases itself (`record_cases`) instead of a logging rule that reads an
+    outside feature, so only a defender's lists need outside code."""
+    record = log and native
+    log = log and not native
     policy = policy or {}
     own = list(policy.get("rules") or [])
     covered = {r["decision"] for r in own}
@@ -39,9 +43,14 @@ def compose(policy, builtin, gates, *, log=True, lists=None):
         if log and gates[decision] == "event":  # after-event decisions (e.g. txn monitoring) can't be labeled: skip
             rules.append({"decision": decision, "when": f"outside.{LOG} != none and outside.{LOG} > 1",
                           "action": _any_action(decision, builtin, own)})
-        rules += [r for r in own if r["decision"] == decision] if decision in covered else \
-                 [r for r in builtin if r["decision"] == decision]
-    dep = {"format": 5, "rules": rules}
+        mine = [r for r in own if r["decision"] == decision] if decision in covered else \
+               [r for r in builtin if r["decision"] == decision]
+        if record and not mine and gates[decision] == "event" and DEFAULTS.get(decision):
+            # The policy must decide (and so record) every event gate, as the logging rule made it do: with no
+            # rule of its own, a gate takes its default action, as it did then.
+            mine = [{"decision": decision, "action": DEFAULTS[decision]}]
+        rules += mine
+    dep = {"format": 7, "record_cases": True, "rules": rules} if record else {"format": 5, "rules": rules}
     if policy.get("models"):
         dep["models"] = policy["models"]
     outside = {LOG: {"type": "number"}} if log else {}
@@ -53,7 +62,7 @@ def compose(policy, builtin, gates, *, log=True, lists=None):
         if lists:
             reading |= set(gates)
         dep["external"] = {d: ({} if gates.get(d) == "event" else {"timeout": "1h"}) for d in reading}
-    else:
+    elif not record:
         dep["format"] = 1
     return dep
 

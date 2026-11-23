@@ -5,6 +5,7 @@ Workspace layout (written by the runner): role, status.md, brief.md, decisions.j
 (attacker), policy.json, notes.md, and data/ (defender: bank.duckdb and Parquet; attacker: results.json)."""
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -40,6 +41,12 @@ USAGE = """usage:
   arena results                (attacker) your syndicate's results so far
   arena note "TEXT"            append a line to your notes (kept between turns)
   arena notes                  print your notes"""
+# The defender task has no lists when the engine records cases natively: lists need outside code at decision time.
+LISTS = os.environ.get("ARENA_NO_LISTS") != "1"
+if not LISTS:
+    USAGE = re.sub(r"  arena list set .*?\n(?=  arena tables)", "", USAGE, flags=re.S)
+NO_LISTS = "lists aren't available in this task: write rules on your decisions' features and models (arena policy help)"
+
 
 
 def main(work, args):
@@ -79,6 +86,8 @@ def main(work, args):
     elif cmd == "rule" and role == "defender":
         rule_command(work, role, args[1:])
     elif cmd == "list" and role == "defender":
+        if not LISTS:
+            sys.exit(NO_LISTS)
         list_command(work, args[1:])
     elif cmd == "fit" and role == "defender":
         fit_command(work, role, args[1:])
@@ -345,9 +354,11 @@ def check(work, role, policy):
             for f in re.findall(r"obs\.([a-zA-Z_0-9]+)", str(r.get("when", ""))):
                 if f not in feats:
                     problems.append(f"rules[{i}]: {d['name']} has no feature {f!r}")
-            lists = load_lists(work)
+            lists = load_lists(work) if LISTS else {}
             for q in re.findall(r"outside\.([a-zA-Z_0-9]+)", str(r.get("when", ""))):
-                if not q.startswith("list_") or q[5:] not in lists:
+                if not LISTS:
+                    problems.append(f"rules[{i}]: outside.{q}: {NO_LISTS}")
+                elif not q.startswith("list_") or q[5:] not in lists:
                     problems.append(f"rules[{i}]: outside.{q} isn't one of your lists (arena list show)")
             for m in re.findall(r"score\.([a-zA-Z_0-9]+)", str(r.get("when", ""))):
                 if m not in models:
