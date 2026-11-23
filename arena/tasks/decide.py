@@ -318,3 +318,37 @@ def _macro_ap(fraud):
                 ap += tp / i
         aps.append(ap / pos)
     return round(sum(aps) / len(aps), 3) if aps else None
+
+
+# --- the leaderboard ------------------------------------------------------------------------------------------------
+# Rank by PR-AUC at the real-world alert fraud rate; alongside: precision at 80% recall, log loss, fraud type (the
+# top-ranked type is one of the true types) and customer role. Cases are enriched with fraud for statistical power;
+# benign cases are weighted back to the real-world rate, which every player is told (case-control sampling).
+
+def leaderboard_metrics(keys, results, rate=None, recall_target=0.80):
+    rate = rate or REAL_WORLD_ALERT_FRAUD_RATE
+    rows = [(r["answer"], keys[c]) for c, r in results.items() if c in keys]
+    y = [1 if k["disposition"] == "fraud" else 0 for _, k in rows]
+    p = [min(max(a["disposition"]["fraud"], 1e-4), 1 - 1e-4) for a, _ in rows]
+    P = sum(y); N = len(y) - P
+    w = (P / rate - P) / N
+    order = sorted(range(len(y)), key=lambda i: -p[i])
+    tp = fp = ap = 0.0; prec_at_recall = None; i = 0
+    while i < len(order):
+        j = i
+        while j < len(order) and p[order[j]] == p[order[i]]:
+            j += 1
+        grp = order[i:j]; d = sum(y[g] for g in grp)
+        tp += d; fp += sum((1 - y[g]) * w for g in grp)
+        if d:
+            ap += d / P * tp / (tp + fp)
+        if prec_at_recall is None and tp / P >= recall_target:
+            prec_at_recall = tp / (tp + fp)
+        i = j
+    ll = sum((1 if yy else w) * -math.log(pp if yy else 1 - pp) for pp, yy in zip(p, y)) / (P + N * w)
+    fraud = [(a, k) for a, k in rows if k["disposition"] == "fraud"]
+    typ = sum(max(a["typology"], key=a["typology"].get) in set(k.get("typologies") or [k["typology"]]) for a, k in fraud)
+    role = sum(max(a["customer_role"], key=a["customer_role"].get) == k["customer_role"] for a, k in rows)
+    return {"pr_auc": ap, "precision_at_80_recall": prec_at_recall, "log_loss": ll,
+            "fraud_type": typ / len(fraud) if fraud else None, "customer_role": role / len(rows), "n": len(rows),
+            "fraud": P}
