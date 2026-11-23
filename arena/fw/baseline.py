@@ -11,8 +11,10 @@ from pathlib import Path
 
 from .tools import DEFAULT_ACTION, NUMERIC, fit
 
-DECISIONS = ("brind_card_auth", "brind_login_check", "brind_account_open_review", "brind_payment_hold",
-             "brind_ach_debit_review")
+# Every Brindlemark decision that can be labeled (transaction monitoring fires after the purchase: no labels).
+DECISIONS = ("brind_card_auth", "brind_login_check", "brind_account_open_review", "brind_business_open_review",
+             "brind_payment_hold", "brind_ach_debit_review", "brind_ach_push", "brind_ach_hold",
+             "brind_wire_release", "brind_consumer_wire")
 
 
 def model_policy(work, log=print):
