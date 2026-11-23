@@ -119,8 +119,12 @@ def make_model(spec):
     from minisweagent.models.openrouter_textbased_model import OpenRouterTextbasedModel
     if not spec.startswith("openrouter:"):
         raise ValueError(f"unknown model spec {spec!r}: use openrouter:<model id>")
-    return OpenRouterTextbasedModel(model_name=spec.split(":", 1)[1], model_kwargs={"temperature": 0.0},
-                                    cost_tracking="ignore_errors")
+    name = spec.split(":", 1)[1]
+    # Prompt caching for models that need explicit markers (Anthropic): the loop resends the whole conversation
+    # each step, so without it every step pays full price for the history.
+    cache = "default_end" if name.startswith("anthropic/") else None
+    return OpenRouterTextbasedModel(model_name=name, model_kwargs={"temperature": 0.0}, cost_tracking="ignore_errors",
+                                    set_cache_control=cache)
 
 
 def play_turn(spec, work, bin_dir, cli, prompt, log_path, *, step_limit=25, cost_limit=5.0, wall_seconds=1800):
