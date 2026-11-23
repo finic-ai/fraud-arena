@@ -1,0 +1,18 @@
+{
+  "hub": "https://runmere.finic.ai/public/worlds/wld_01m7gjgv6z5syh222t2g0qsyse",
+  "api": "https://runmere.finic.ai/api/v1/public/{world}/worlds/{world}/versions/{version}",
+  "world_id": "wld_01m7gjgv6z5syh222t2g0qsyse",
+  "version": 2,
+  "entry": "worlds/fraud-world/world.yaml",
+  "sha256": "8bc92c1d681702e5855b7e9f69557211d415ca5bfdc4a763112dbbff70709694",
+  "tiers": {
+    "arena": {
+      "description": "1v1 matches: no independent fraudsters, so all fraud is the rings'. The harness sets each ring's intensity with the ring_volume intervention (0 to 16).",
+      "params": {"fraud_density": 0.0}
+    },
+    "tasks": {
+      "description": "Investigation tasks: the world's own fraud rates, independent fraudsters as well as the rings.",
+      "params": {"fraud_density": 0.62}
+    }
+  }
+}

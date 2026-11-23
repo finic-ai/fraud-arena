@@ -29,7 +29,7 @@ import duckdb
 
 # --- 1. contact details -----------------------------------------------------------------------------------------------
 
-# world provider -> [(real domain, weight)]. The world's provider shares (worlds/fraud-world-tasks.yaml, email
+# world provider -> [(real domain, weight)]. The world's provider shares (Fraud World's email
 # `provider`) encode: example.com the largest free provider (more among the young), example.net an older-skewed
 # portal, example.org a mid-age webmail, inbox.example a young-skewed device-maker mail, isp.example an internet
 # provider's mail (older people), privatemail.example a privacy provider, tempbox.example a disposable service.

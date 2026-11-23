@@ -17,8 +17,8 @@ import runmere
 from . import scoring
 from .deployment import LOG, compose, world_bits
 from .config import INSTITUTIONS, ScoreWeights
+from ..world_source import tier
 
-WORLD = Path("/private/var/folders/ry/jh93lvp15pn2dnnynp0t2j8r0000gn/T/rm-main/worlds/fraud-world/world.yaml")
 INSTITUTION, ROLE, OBSERVER = "brindlemark", "brind_defender", "brindlemark"
 WEIGHTS = ScoreWeights()
 # Victim reports: the share of fraud whose victim reports it, and the delay range in days after it became knowable.
@@ -31,7 +31,7 @@ def iso(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
 
 
-def ring_menu(world_path=WORLD):
+def ring_menu(world_path):
     """The ring plan menu from the world's `env.interventions`: attribute -> {min, max} or {values}."""
     import yaml
     spec = yaml.safe_load(Path(world_path).read_text())
@@ -58,7 +58,7 @@ def ring_menu(world_path=WORLD):
     return menu
 
 
-def code_lists(world_path=WORLD):
+def code_lists(world_path):
     import yaml
     spec = yaml.safe_load(Path(world_path).read_text())
     return {k: v.get("values", []) for k, v in ((spec.get("vocab") or {}).get("code_lists") or {}).items()}
@@ -84,11 +84,12 @@ def _run_all(runs, day):
 
 
 class Match:
-    def __init__(self, out, *, world=WORLD, seed=7, roots=1500, warmup_days=60, week_days=7, intensity=1.0,
+    def __init__(self, out, *, world=None, seed=7, roots=1500, warmup_days=60, week_days=7, intensity=1.0,
                  history_cache=None):
         self.out = Path(out)
         self.lists = {}  # the defender's lists: name -> {key, set of values}
-        self.world_path, self.seed, self.roots = Path(world), seed, roots
+        # The 1v1 tier of the Fraud World version pinned in fraud-world.json, unless a world file is given.
+        self.world_path, self.seed, self.roots = Path(world or tier("arena")), seed, roots
         self.week_days, self.warmup_days = week_days, warmup_days
         self.world = runmere.World.load(str(self.world_path))
         # Log the bank's cases during the warm-up too (its history, for training): the logging deployment is
