@@ -51,6 +51,14 @@ def set_param(text, name, value):
     return out
 
 
+def _link(link, target):
+    """A symlink, unless another process made it first (two runs filling the cache at once)."""
+    try:
+        link.symlink_to(target)
+    except FileExistsError:
+        pass
+
+
 def tier(name):
     """The path of the world for one tier (`arena` or `tasks`), written once per pinned version."""
     params = PIN["tiers"][name]["params"]
@@ -64,17 +72,18 @@ def tier(name):
         # Everything the world reads by relative path: its own folder's files, and the engine's plugin registry.
         for item in src.parent.iterdir():
             link = folder / item.name
-            if not item.name.startswith("world.") and not link.exists():
-                link.symlink_to(item)
-        if not (base / "registry").exists():
-            (base / "registry").symlink_to(root / "registry")
+            if not item.name.startswith("world.") and not link.is_symlink():
+                _link(link, item)
+        _link(base / "registry", root / "registry")
         text = src.read_text()
         for k, v in params.items():
             text = set_param(text, k, v)
         lock = src.with_suffix(".lock")
         if lock.exists():
-            path.with_suffix(".lock").write_text(lock.read_text())
-        tmp = path.with_suffix(".tmp")
+            lk = path.with_suffix(f".lock.{os.getpid()}")
+            lk.write_text(lock.read_text())
+            lk.replace(path.with_suffix(".lock"))
+        tmp = path.with_suffix(f".tmp.{os.getpid()}")
         tmp.write_text(text)
         tmp.replace(path)
     return path
