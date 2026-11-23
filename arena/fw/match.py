@@ -228,13 +228,23 @@ class Match:
     def deploy(self, policy, lists=None):
         """Deploy the defender's policy into the candidate run; None restores the built-in rules. Returns an error
         message, or None. A failed deploy leaves the previous policy in place."""
-        try:
-            self.previous, self.previous_lists = self.deployed, getattr(self, "deployed_lists", None)
-            self._apply(self.cand, policy, lists)
-            self.deployed, self.deployed_lists = policy, lists
-            return None
-        except Exception as error:
-            return f"{type(error).__name__}: {error}"
+        import copy
+        import re
+        self.previous, self.previous_lists = self.deployed, getattr(self, "deployed_lists", None)
+        policy, dropped = copy.deepcopy(policy), []
+        for _ in range(50):
+            try:
+                self._apply(self.cand, policy, lists)
+                self.deployed, self.deployed_lists = policy, lists
+                return f"deployed without {len(dropped)} rule(s) the engine refused: " + "; ".join(dropped) if dropped else None
+            except Exception as error:
+                m = re.match(r"rules\.(\d+)\.", str(error))
+                rules = (policy or {}).get("rules") or []
+                if not m or int(m.group(1)) >= len(rules):
+                    return f"{type(error).__name__}: {error}"
+                rules.pop(int(m.group(1)))
+                dropped.append(str(error)[:200])
+        return "too many refused rules: " + "; ".join(dropped[:3])
 
     def set_plan(self, plan):
         """Apply the attacker's plan: {"all": {attr: value}, "rings": {"<number>": {attr: value}}}. Attributes not
@@ -248,7 +258,11 @@ class Match:
                     problems.append(f"ring {number} {attr}: targeting is fixed at Brindlemark")
                     continue
                 if attr == "plan_volume":  # relative to the match intensity; unset means the intensity itself
-                    value = float(self.intensity) * (1.0 if value is None else float(value))
+                    from .cli import MAX_RING_VOLUME
+                    value = float(self.intensity) * (1.0 if value is None else min(float(value), MAX_RING_VOLUME))
+                elif attr.startswith("plan_tactic_") and value is not None:
+                    from .cli import MAX_TACTIC
+                    value = min(float(value), MAX_TACTIC)
                 try:
                     self.cand.intervene("ring", ring, attr, value)
                 except Exception as error:

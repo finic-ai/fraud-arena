@@ -52,6 +52,21 @@ the labeled cases (it reports test metrics and the net dollars each cutoff would
 model to your policy); `arena list set` for lists the bank checks at decision time (e.g. devices, accounts or
 customers tied to confirmed fraud), which rules read as outside.list_NAME; and `arena policy set` for whole policies
 (JSON or YAML).
+
+What the actions do in this world (they differ a lot in how much fraud they stop):
+- block, reject, decline and return_debit stop the event: the payment, login, authorization or debit doesn't go
+  through (and an application is refused). They stop all of the fraud they hit and cost the most friction.
+- hold and callback mean the bank calls the account holder before the money goes. When the real holder is making the
+  payment, including scam victims who were talked into it, they almost always confirm and it goes out (about 95% of
+  P2P payments). When someone else controls the account (a takeover), the call reaches the real owner and most such
+  payments are stopped (about 92%). Wires and ACH transfers work the same way through their callback.
+- step_up asks for a one-time code. It stops an attacker who has only a password, but not a phishing kit that
+  captured the code along with the password, nor someone who has taken over the customer's phone number.
+- warn shows a scam warning: few scam victims abandon (about 1 in 8). cooling_off delays the payment a day and tells
+  the contact details on file: about half of takeovers are stopped (few when the attacker changed the contact
+  details) and about a quarter of scam payments.
+- review sends an application to the bank's analysts (10 a day, then $75 each).
+`arena fit` prices a cutoff as if the action stops every fraud it flags; that is only true of the stopping actions.
 """,
     "attacker": """# You are the ATTACKER: a fraud ring (Fraud Arena)
 

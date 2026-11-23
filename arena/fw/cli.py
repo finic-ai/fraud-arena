@@ -271,12 +271,17 @@ def policy_help(work, role):
     lines.append(f"BUDGET: the syndicate has limited people, money and mules. plan_volume summed over the 10 rings must be at "
                  f"most {VOLUME_BUDGET:g} (each unset ring counts 1, so scripted is 10), and the 22 scheme multipliers must "
                  f"sum to at most {TACTIC_BUDGET:g} (each scheme counts its highest multiplier across rings; scripted is 22). "
-                 f"To push some rings or schemes harder, turn others down.")
+                 f"To push some rings or schemes harder, turn others down. Caps: a crew's plan_volume is at most "
+                 f"{MAX_RING_VOLUME:g} and a scheme multiplier at most {MAX_TACTIC:g}.")
     return "\n".join(lines)
 
 
 VOLUME_BUDGET = 12.0  # sum of plan_volume over the 10 rings (scripted: 10 x 1)
 TACTIC_BUDGET = 26.0  # sum over the 22 schemes of each scheme's multiplier (scripted: 22 x 1)
+# Per-value caps: a crew's volume and a scheme's multiplier both apply at several stages of a scheme (e.g. phishing
+# credentials and then using them), so concentrating the whole budget compounds; cap each value.
+MAX_RING_VOLUME = 3.0
+MAX_TACTIC = 2.0
 
 
 def plan_effort(plan, menu):
@@ -301,6 +306,14 @@ def budget_problems(plan, menu):
     if volume > VOLUME_BUDGET + 1e-9:
         out.append(f"over the volume budget: plan_volume summed over the 10 rings is {volume:.2f}, at most {VOLUME_BUDGET:g} "
                    f"(unset rings count 1)")
+    for ring in range(1, 11):
+        merged = dict(plan.get("all") or {}) if isinstance(plan, dict) else {}
+        merged.update(((plan or {}).get("rings") or {}).get(str(ring)) or {})
+        if merged.get("plan_volume") is not None and float(merged["plan_volume"]) > MAX_RING_VOLUME + 1e-9:
+            out.append(f"crew {ring}: plan_volume {merged['plan_volume']} is above the cap of {MAX_RING_VOLUME:g}")
+        for k, v in merged.items():
+            if k.startswith("plan_tactic_") and v is not None and float(v) > MAX_TACTIC + 1e-9:
+                out.append(f"crew {ring}: {k} {v} is above the cap of {MAX_TACTIC:g}")
     if tactics > TACTIC_BUDGET + 1e-9:
         out.append(f"over the scheme budget: the 22 scheme multipliers sum to {tactics:.2f}, at most {TACTIC_BUDGET:g} "
                    f"(each scheme counts its highest multiplier across rings; unset counts 1)")

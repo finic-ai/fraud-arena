@@ -27,10 +27,13 @@ NUMERIC = ("money", "int", "float", "bool")
 # What a caught fraud is worth when the decision has no amount (a stated assumption; --fraud-value overrides it).
 FRAUD_VALUE = {"brind_login_check": 300.0, "brind_account_open_review": 500.0, "brind_business_open_review": 500.0}
 # The action a model cutoff would take, per decision (the cost-aware report prices it).
-DEFAULT_ACTION = {"brind_card_auth": "decline", "brind_login_check": "step_up", "brind_payment_hold": "hold",
-                  "brind_account_open_review": "review", "brind_business_open_review": "review",
-                  "brind_ach_debit_review": "return_debit", "brind_ach_push": "hold", "brind_ach_hold": "hold",
-                  "brind_wire_release": "hold", "brind_consumer_wire": "hold", "brind_txn_monitoring": "raise_alert"}
+# Stopping actions: the cost-aware report counts a flagged fraud as prevented, which only they guarantee (a hold or
+# callback lets a scam victim's payment through, a step-up doesn't stop a phishing kit that captured the code).
+DEFAULT_ACTION = {"brind_card_auth": "decline", "brind_login_check": "block", "brind_payment_hold": "block",
+                  "brind_account_open_review": "decline", "brind_business_open_review": "decline",
+                  "brind_ach_debit_review": "return_debit", "brind_ach_push": "reject", "brind_ach_hold": "reject",
+                  "brind_wire_release": "reject", "brind_consumer_wire": "reject", "brind_txn_monitoring": "raise_alert"}
+STOPPING = ("block", "reject", "decline", "return_debit")
 
 
 def fit(work, kind, decision, features, *, label="fraud_known", where=None, depth=3, trees=60, balanced=False,
@@ -115,6 +118,8 @@ def fit(work, kind, decision, features, *, label="fraud_known", where=None, dept
         report.append(f"Net dollars on the test cases if your rule took action {act!r} above each cutoff (caught fraud "
                       f"counted at {'its amount' if fv is None else f'its amount, or ${fv:.0f} without one'}; each good "
                       f"case flagged costs the match's friction for {act!r}):")
+        if act not in STOPPING:
+            report.append(f"  Caution: {act!r} doesn't stop every fraud it hits (see your brief), so these nets overstate it.")
         best = None
         for share in (0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2):
             t = float(np.quantile(p, 1 - share))
