@@ -141,6 +141,7 @@ class Truth:
         s = {i["cust"] for i in self.inv}
         s |= {c for c, h in self.acct_hist.items() if h}
         s |= {c for c, v in self.identity.items() if v["kind"] != "real"}
+        s.discard(None)  # a fraud event on an account with no Brindlemark customer (e.g. an outside account)
         return s
 
 
