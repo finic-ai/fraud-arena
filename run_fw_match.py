@@ -150,14 +150,18 @@ def main():
     ap.add_argument("--warmup", type=int, default=30)
     ap.add_argument("--intensity", type=float, default=3.0, help="ring volume during the match, x their usual")
     ap.add_argument("--max-turns", type=int, default=25)
+    ap.add_argument("--defender-only", action="store_true",
+                    help="no attacking agent: advance only the candidate and no-defense runs (requires --attacker none)")
     ap.add_argument("--history-cache", help="a folder holding this seed's warm-up (built once, shared by defenders)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    if args.defender_only and is_ai(args.attacker):
+        ap.error("--defender-only needs a non-agent attacker (e.g. --attacker none)")
 
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
     m = Match(out, world=args.world and Path(args.world), seed=args.seed, roots=args.roots, warmup_days=args.warmup,
-              intensity=args.intensity, history_cache=args.history_cache)
+              intensity=args.intensity, history_cache=args.history_cache, defender_only=args.defender_only)
     players = {"defender": args.defender, "attacker": args.attacker}
     works = {}
     for role, who in players.items():
@@ -184,7 +188,8 @@ def main():
     for wk in range(args.weeks):
         # Views as of the start of this week.
         m.defender_view(works["defender"] / "data")
-        att_view = m.attacker_view(weeks, weeks[-1]["_truth"]) if weeks else {"results": [], "schemes_started_to_date": {}}
+        att_view = (m.attacker_view(weeks, weeks[-1]["_truth"]) if weeks and not args.defender_only
+                    else {"results": [], "schemes_started_to_date": {}})
         (works["attacker"] / "data" / "results.json").write_text(json.dumps(att_view, indent=1))
         for role, work in works.items():
             lines = [f"# Week {wk + 1} of {args.weeks} is next.", ""]
@@ -194,6 +199,8 @@ def main():
                     lines.append(f"week {i}: score {s:+.0f} (losses prevented {d['prevented']:+.0f}, added friction "
                                  f"{d['added_friction']:+.0f}; fraud losses at the bank {d['candidate']['losses']:.0f} vs "
                                  f"{d['no_defense']['losses']:.0f} with the built-in rules)")
+                elif w["attacker"] is None:  # defender-only: no attacker results
+                    continue
                 else:
                     a = w["attacker"]
                     lines.append(f"week {i}: score {s:+.0f} (took {a['candidate']:.0f} at Brindlemark; your crews on their "
@@ -249,15 +256,16 @@ def main():
             plan_problems += m.set_plan(plan)
         res, truth, _ = m.play_week()
         scores["defender"].append(res["defender"]["score"])
-        scores["attacker"].append(res["attacker"]["score"])
+        scores["attacker"].append(res["attacker"]["score"] if res["attacker"] else 0.0)
         deploy_error = deploy_error or (f"your policy stopped the bank's systems mid-week and was rolled back: {m.runtime_error}"
                                         if m.runtime_error else None)
         weeks.append({**res, "_truth": str(truth), "turns": turns, "deploy_error": deploy_error,
                       "plan_problems": plan_problems,
                       "policies": {r: json.loads((w / "policy.json").read_text()) for r, w in works.items()}})
-        print(f"week {wk + 1}: defender {res['defender']['score']:+.0f}  attacker {res['attacker']['score']:+.0f}  "
-              f"[bank losses cand {res['defender']['candidate']['losses']:.0f} no-def {res['defender']['no_defense']['losses']:.0f} "
-              f"no-att {res['defender']['no_attack']['losses']:.0f} ref {res['defender']['reference']['losses']:.0f}]  "
+        lose = lambda k: f"{res['defender'][k]['losses']:.0f}" if res["defender"][k] else "-"  # noqa: E731
+        print(f"week {wk + 1}: defender {res['defender']['score']:+.0f}  attacker {scores['attacker'][-1]:+.0f}  "
+              f"[bank losses cand {lose('candidate')} no-def {lose('no_defense')} "
+              f"no-att {lose('no_attack')} ref {lose('reference')}]  "
               + "  ".join(f"{r}: {t.get('turns')} turns {t.get('seconds')}s" for r, t in turns.items() if not t.get("skipped"))
               + (f"  DEPLOY ERROR: {deploy_error[:120]}" if deploy_error else ""), flush=True)
 
@@ -267,7 +275,7 @@ def main():
     net = sum(w["defender"]["prevented"] - w["defender"]["added_friction"] for w in weeks)
     headline = {"defender_share_prevented": round(net / exposed, 4) if exposed else 0.0,
                 "losses_exposed": round(exposed, 2), "net_saved": round(net, 2),
-                "attacker_extra_take": round(sum(scores["attacker"]), 2)}
+                "attacker_extra_take": None if args.defender_only else round(sum(scores["attacker"]), 2)}
     summary = {"players": players, "seed": args.seed, "weeks": args.weeks,
                "headline": headline, "total": {r: round(sum(v), 1) for r, v in scores.items()},
                "per_week": scores}

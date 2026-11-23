@@ -85,7 +85,10 @@ def _run_all(runs, day):
 
 class Match:
     def __init__(self, out, *, world=None, seed=7, roots=1500, warmup_days=60, week_days=7, intensity=1.0,
-                 history_cache=None):
+                 history_cache=None, defender_only=False):
+        # Defender-only: no attacking agent, so only the two runs the defender's score needs (candidate and
+        # no-defense) advance each week; the no-attack and reference runs are skipped.
+        self.defender_only = defender_only
         self.out = Path(out)
         self.lists = {}  # the defender's lists: name -> {key, set of values}
         # The 1v1 tier of the Fraud World version pinned in fraud-world.json, unless a world file is given.
@@ -297,6 +300,8 @@ class Match:
         def forks():
             trial = week_start.fork()
             trial.set_outside(self._outside)
+            if self.defender_only:
+                return trial, None
             no_att = week_start.fork()  # the defender's policy against the scripted crews
             no_att.set_outside(self._quiet_outside(self.deployed))
             self._script_plan(no_att)
@@ -307,7 +312,10 @@ class Match:
         no_def.undeploy(ROLE)
         no_def.set_outside(None)
         # The four runs advance concurrently: the engine releases the GIL while it simulates.
-        errors = _run_all([trial, no_att, no_def, self.ref], end_day)
+        runs = [trial, no_def] if self.defender_only else [trial, no_att, no_def, self.ref]
+        errors = _run_all(runs, end_day)
+        if self.defender_only:  # same positions as the four-run case: trial, no_att, no_def, ref
+            errors = [errors[0], None, errors[1], None]
         if errors[0] or errors[1]:
             # The defender's rules stopped the run (e.g. ordering a `none` feature): keep the previous policy and
             # play the week again from the untouched week-start state.
@@ -316,7 +324,7 @@ class Match:
             self._apply(week_start, self.previous, getattr(self, "previous_lists", None))
             self.deployed, self.deployed_lists = self.previous, getattr(self, "previous_lists", None)
             trial, no_att = forks()
-            again = _run_all([trial, no_att], end_day)
+            again = _run_all([r for r in (trial, no_att) if r is not None], end_day)
             if any(again):
                 raise next(e for e in again if e)
         if errors[2] or errors[3]:
@@ -328,14 +336,25 @@ class Match:
         cand_truth, owners = self._export(self.cand, wdir / "candidate")
         self.all_cases += self.week_cases
         self.last_truth = cand_truth
-        truths = {"no_defense": self._export(no_def, wdir / "no_defense")[0],
-                  "no_attack": self._export(no_att, wdir / "no_attack")[0],
-                  "reference": self._export(self.ref, wdir / "reference")[0]}
+        truths = {"no_defense": self._export(no_def, wdir / "no_defense")[0]}
+        if not self.defender_only:
+            truths["no_attack"] = self._export(no_att, wdir / "no_attack")[0]
+            truths["reference"] = self._export(self.ref, wdir / "reference")[0]
         bank = lambda t: scoring.window_score(t, owners, institution=INSTITUTION, role=ROLE, start=start, end=end,  # noqa: E731
                                               weights=WEIGHTS)
-        d_c, d_nd, d_na, d_r = bank(cand_truth), bank(truths["no_defense"]), bank(truths["no_attack"]), \
-            bank(truths["reference"])
+        d_c, d_nd = bank(cand_truth), bank(truths["no_defense"])
         defender = scoring.paired(d_c, d_nd, WEIGHTS)
+        if self.defender_only:
+            result = {
+                "week": self.week, "start": start, "end": end,
+                "defender": {"score": defender.composite, "prevented": defender.losses_prevented,
+                             "added_friction": defender.added_friction, "candidate": d_c.as_dict(),
+                             "no_defense": d_nd.as_dict(), "no_attack": None, "reference": None,
+                             "vs_reference": None},
+                "attacker": None,
+            }
+            return result, cand_truth, owners
+        d_na, d_r = bank(truths["no_attack"]), bank(truths["reference"])
         vs_reference = scoring.paired(d_c, d_r, WEIGHTS)
 
         def at_bank(x):  # what a ring takes from the defended bank: losses + mule flow at its weight
