@@ -23,6 +23,8 @@ INSTITUTION, ROLE, OBSERVER = "brindlemark", "brind_defender", "brindlemark"
 WEIGHTS = ScoreWeights()
 # Victim reports: the share of fraud whose victim reports it, and the delay range in days after it became knowable.
 REPORT_SHARE, REPORT_DAYS = 0.8, (2, 10)
+# Percent of aggregator sign-ins kept as training cases (enough to learn that the channel is benign).
+AGGREGATOR_SAMPLE = 5
 
 
 def iso(ms):
@@ -170,6 +172,10 @@ class Match:
         needs = case.get("needs", [])
         answers = {}
         if LOG in needs:
+            feats = case.get("features") or {}
+            if log and feats.get("aggregator") and \
+                    int(__import__("hashlib").sha1(str(case.get("key")).encode()).hexdigest(), 16) % 100 >= AGGREGATOR_SAMPLE:
+                log = False  # aggregator polls are high-volume and benign: keep a small, deterministic sample
             if log:
                 self.week_cases.append({"key": case.get("key"), "decision": case.get("decision"),
                                         "time": case.get("time"), "features": case.get("features") or {},
