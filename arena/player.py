@@ -81,7 +81,13 @@ class RestrictedEnvironment:
         self.env["PATH"] = f"{self.bin_dir}:{os.environ.get('PATH', '')}"
 
     def execute(self, action, cwd="", *, timeout=None):
-        out = self._execute(action, timeout)
+        from minisweagent.exceptions import Submitted
+        try:
+            out = self._execute(action, timeout)
+        except Submitted:
+            raise
+        except Exception as error:  # noqa: BLE001  (never end a turn on a harness error: report it to the model)
+            out = self._out(f"error running the command: {type(error).__name__}: {error}", 1)
         left = self.step_limit - len(self.commands) if self.step_limit else None
         if left is not None and left <= self.warn_at:
             # The same reminder for every model: small models otherwise spend the whole budget investigating.
@@ -103,6 +109,7 @@ class RestrictedEnvironment:
             path = (self.work / m.group(2)).resolve()
             if (self.work / "drafts").resolve() not in path.parents:
                 return self._out("refused: files can only be written under drafts/", 1)
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(m.group(3) + "\n")
             return self._out(f"wrote {m.group(2)} ({len(m.group(3))} characters)", 0)
         try:
