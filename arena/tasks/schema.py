@@ -63,3 +63,9 @@ SCENARIOS = {
 # The money the customer itself sends out in a scam (a victim's own payment); receiving alone is not victimhood.
 PAYING_EVENTS = {"p2p_send", "personal_wire", "ach_transfer_out", "ach_debit", "cash_withdrawal", "payee_add",
                  "card_purchase", "transfer_internal", "login", "bank_call", "wire_out"}
+
+
+# The fraud share of a real bank's fraud alert queue (industry: about 5-20% of fraud alerts are confirmed fraud).
+# Cases are sampled with more fraud for statistical power; every player is told this rate, and scoring weights the
+# benign cases back to it (case-control sampling with prior correction).
+REAL_WORLD_ALERT_FRAUD_RATE = 0.10

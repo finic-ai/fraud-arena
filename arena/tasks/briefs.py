@@ -35,6 +35,7 @@ TOOLS = """## Tools (only `casefile` commands work)
 
 You only see what the bank had loaded by the case time (every table has LOAD_TS). Account and card *status* columns
 are not available (they would show later outcomes). Amounts are USD. Everything is simulated; no real people."""
+from .schema import REAL_WORLD_ALERT_FRAUD_RATE  # noqa: E402
 
 
 def alert_brief(case):
@@ -51,9 +52,9 @@ involved, what kind, and what this customer's role is.
 - Alert time: {a['time']}  (reference {a['ref']})
 - Case time (your data is as of): {case['case_time']}
 
-Base rate: in this review set about {round(share * 100)}% of the alerts involve fraud (a sampling choice; real alert
-queues are far more benign). Fraud here means the customer is a perpetrator, a victim or a mule of a fraud that had
-already started by the case time; benign look-alikes come from the same monitors.
+Base rate: about {round(REAL_WORLD_ALERT_FRAUD_RATE * 100)}% of alerts like this involve fraud, as in a real bank's alert
+queue. Fraud here means the customer is a perpetrator, a victim or a mule of a fraud that had already started by the
+case time; benign look-alikes come from the same monitors.
 
 {TYPOLOGY_HELP}
 

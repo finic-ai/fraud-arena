@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 from .cli import Case, cmd_customer, LINK_KINDS
+from .schema import REAL_WORLD_ALERT_FRAUD_RATE
 
 TYPOLOGIES = {
     "ato": "account takeover: someone else logged in to or took over the customer's account",
@@ -80,7 +81,8 @@ def _build_packet(case_dir, max_chars):
     out.write(f"# Alert at Brindlemark Bank (case {case['case_id']})\n"
               f"Customer: {case['customer']}\nAlert type: {a['type']} ({a['monitor']})\nReason: {a['reason']}\n"
               f"Alert time: {a['time']}\nData as of: {case['case_time']}\n"
-              f"Base rate: about {round(100 * case.get('fraud_share', 0.45))}% of alerts in this set involve fraud.\n\n")
+              f"Base rate: about {round(100 * REAL_WORLD_ALERT_FRAUD_RATE)}% of alerts like this involve fraud, as in a real "
+              f"bank's alert queue.\n\n")
     with contextlib.redirect_stdout(out):
         try:
             cmd_customer(c, case["customer"])
