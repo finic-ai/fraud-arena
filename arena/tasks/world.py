@@ -51,7 +51,8 @@ def simulate(out, *, seed, roots, days, world=WORLD, log=print):
         run.run_until_day(days)
     run.write_observer(OBSERVER, str(out / "truth" / "obs"))
     run.write_truth(str(out / "truth" / "world"))
-    meta = {"seed": seed, "roots": roots, "days": days, "world": str(Path(world).relative_to(REPO)),
+    meta = {"seed": seed, "roots": roots, "days": days, "world": (str(Path(world).relative_to(REPO)) if Path(world).is_relative_to(REPO) else str(world)),
+            "world_version": runmere.World.load(str(world)).version(),
             "seconds": round(time.time() - t0)}
     (out / "world.json").write_text(json.dumps(meta, indent=1))
     log(f"  simulated in {meta['seconds']}s")
