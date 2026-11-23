@@ -22,7 +22,7 @@ from .config import ScoreWeights
 # a loss whatever the sale brought in.
 MERCHANTS = ("hopcrate", "kellmont")
 
-ADVERSE = ("decline", "reject", "deny", "refuse", "step_up", "hold", "standard", "review", "raise_alert", "block", "restrict",
+ADVERSE = ("decline", "reject", "deny", "refuse", "return_debit", "step_up", "hold", "standard", "review", "raise_alert", "block", "restrict",
            "close_account")
 
 

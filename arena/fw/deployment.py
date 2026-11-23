@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 LOG = "arena_log"
+DEFAULTS = {}  # decision -> its default action (for the logging rule of a decision with no rules anywhere)
 
 
 def world_bits(world_path, role, builtin_policy):
@@ -24,6 +25,7 @@ def world_bits(world_path, role, builtin_policy):
             continue
         at = d.get("at") or {}
         gates[name] = "event" if ("event" in at and not at.get("after")) else "wait"
+        DEFAULTS[name] = d.get("default_action")
     return builtin, gates
 
 
@@ -56,4 +58,6 @@ def _any_action(decision, builtin, own):
     for r in own + builtin:
         if r["decision"] == decision:
             return r["action"]
+    if DEFAULTS.get(decision):
+        return DEFAULTS[decision]
     raise ValueError(f"no action known for {decision}")

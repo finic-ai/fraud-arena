@@ -4909,6 +4909,9 @@ world:
             where=it.institution == account.institution and it.type == 'savings' and it.status == 'open'), 0) >= amount)
           else: insufficient_funds
         - {when: "not account.manual_restricted", else: frozen}
+      # Brindlemark (the arena's defended bank) decides each incoming debit to its accounts: ok (pay it) or return_debit
+      # (send it back as unauthorized, R10, before the money leaves).
+      gate: [brind_ach_debit_review]
       effects:
         ok:
           # An overdraft transfer from the holder's savings covers what the checking account lacks.
@@ -4956,6 +4959,10 @@ world:
           - emit:
               <<: *ach_return_emit
               fields: {account: account, amount: amount, cp_name: cp_name, return_code: "'R16'", entry_kind: "'debit'", origin_endpoint: origin_endpoint, origin_reversal: "coalesce(origin_credited, 0)"}
+        return_debit:
+          - emit:
+              <<: *ach_return_emit
+              fields: {account: account, amount: amount, cp_name: cp_name, return_code: "'R10'", entry_kind: "'debit'", origin_endpoint: origin_endpoint, origin_reversal: "coalesce(origin_credited, 0)"}
 
     card_bill_payment:
       description: >-
@@ -29949,6 +29956,12 @@ env:
       actions: [release, hold, reject]
       default_action: release
       observation: brind_ach_view
+    brind_ach_debit_review:
+      role: brind_defender
+      at: {event: ach_debit, where: "account.institution == institution('brindlemark')"}
+      actions: [ok, return_debit]
+      default_action: ok
+      observation: brind_ach_debit_view
     dovrex_account_open_review:
       role: dovrex_defender
       at: {event: account_application, where: "institution == institution('dovrex')"}
@@ -30700,6 +30713,35 @@ env:
             else last(subject.history('beneficiary_update', '180d'), where=it.vendor == event.vendor, by=it.time).note
           description: "The note entered with the latest change to the beneficiary's bank details; none without one in 180 days."
       tables: [WIRES, TREASURY_APPROVALS, TREASURY_LOGINS, BENEFICIARIES, BENEFICIARY_CHANGES]
+    brind_ach_debit_view:
+      observer: brindlemark
+      subject: event.account.holder
+      window: 180d
+      features:
+        amount: {value: event.amount, description: "The debit's amount in dollars."}
+        web_entry: {value: "event.sec_code == 'WEB'", description: "Authorized online (SEC code WEB), as account-to-account pulls are."}
+        first_from_originator:
+          value: "count(subject.history('ach_debit', '180d'), where=it.account == event.account and it.cp_name == event.cp_name) == 0"
+          description: The first debit from this originator to this account in 180 days.
+        originator_debits_180d:
+          value: "count(subject.history('ach_debit', '180d'), where=it.account == event.account and it.cp_name == event.cp_name)"
+          description: Earlier debits from this originator to this account in the last 180 days.
+        debits_7d:
+          value: "count(subject.history('ach_debit', '7d'), where=it.account == event.account)"
+          description: Debits to this account in the last 7 days.
+        debit_amount_7d:
+          value: "sum(subject.history('ach_debit', '7d'), it.amount, where=it.account == event.account)"
+          description: Dollars debited from this account in the last 7 days.
+        amount_over_balance:
+          value: "event.amount / max(event.account.balance, 1)"
+          description: The debit over the account's balance before it.
+        profile_change_7d:
+          value: "count(subject.history('profile_change', '7d')) > 0"
+          description: The customer changed an email, phone, address or 2FA in the last 7 days.
+        account_age_days: {value: "days_since(event.account.opened_at)", description: Days since the account opened.}
+        payroll_7d:
+          value: "count(subject.history('ach_credit', '7d'), where=it.account == event.account) > 0"
+          description: An ACH credit (e.g. pay) reached the account in the last 7 days.
     brind_ach_view:
       observer: brindlemark
       subject: event.account.business
