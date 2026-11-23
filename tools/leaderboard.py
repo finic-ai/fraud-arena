@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from arena.tasks.decide import leaderboard_metrics  # noqa: E402
 
-COLS = ["roc_auc", "pr_auc", "log_loss", "brier", "precision_at_80_recall", "fraud_type", "customer_role"]
+COLS = ["pr_auc", "roc_auc", "log_loss", "brier", "precision_at_80_recall", "fraud_type", "customer_role"]
 
 ap = argparse.ArgumentParser()
 ap.add_argument("cases", nargs="+")

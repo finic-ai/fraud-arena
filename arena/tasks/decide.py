@@ -322,8 +322,8 @@ def _macro_ap(fraud):
 
 
 # --- the leaderboard ------------------------------------------------------------------------------------------------
-# Rank by ROC-AUC (it doesn't depend on the assumed fraud rate; McDermott et al., NeurIPS 2024); alongside: PR-AUC,
-# log loss and Brier score at the real-world alert fraud rate, and precision at 80% recall (the usual operating point
+# Rank by PR-AUC at the real-world alert fraud rate; alongside: ROC-AUC (rate-free; McDermott et al., NeurIPS 2024),
+# log loss and Brier score at that rate, and precision at 80% recall (the usual operating point
 # for human-review triage: CUAD, technology-assisted review). Fraud type (the top-ranked type is one of the true
 # types) and customer role are reported too. Cases are enriched with fraud for statistical power; benign cases are
 # weighted back to the real-world rate, which every player is told (case-control sampling).
