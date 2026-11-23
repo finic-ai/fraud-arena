@@ -10,6 +10,7 @@ Players:
   baseline                 a heuristic over the packet's alert type (a floor)
   openrouter:<model id>    any LLM, one call, JSON probabilities
   grayson                  Finic's Grayson decision API (data + choice questions); key from GRAYSON_API_KEY
+  jev[:jev-1.13]           TypeSafe's Jev decision model through OpenRouter's System One API
 """
 
 import contextlib
@@ -164,6 +165,30 @@ def answer_claude(model, text):
     return {q: _normalize(ans.get(q) or {}, QUESTIONS[q]["criteria"]) for q in QUESTIONS}, float(d.get("total_cost_usd") or 0)
 
 
+def answer_jev(text, model="typesafe/jev-1.14"):
+    """Jev (TypeSafe's decision model) through OpenRouter's System One API: the same state + choice questions."""
+    key = os.environ["OPENROUTER_API_KEY"]
+    body = {"model": model, "state": {"case_packet": text},
+            "questions": {q: {"type": "choice", "instructions": s["instructions"], "criteria": s["criteria"]}
+                          for q, s in QUESTIONS.items()}}
+    req = Request("https://openrouter.ai/api/v1/systemone", data=json.dumps(body).encode(),
+                  headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+    with urlopen(req, timeout=120) as r:
+        d = json.load(r)
+    return _parse_choice_answers(d), float((d.get("usage") or {}).get("cost") or 0.0)
+
+
+def _parse_choice_answers(d):
+    out = {}
+    for q, spec in QUESTIONS.items():
+        a = (d.get("answers") or {}).get(q) or {}
+        probs = a.get("probabilities") or {}
+        if isinstance(probs, list):  # [{"option": .., "probability": ..}]
+            probs = {x.get("option") or x.get("label"): x.get("probability") for x in probs}
+        out[q] = _normalize(probs, spec["criteria"])
+    return out
+
+
 def answer_grayson(text):
     key = os.environ["GRAYSON_API_KEY"]
     body = {"model": "grayson-1", "data": {"case_packet": text},
@@ -191,6 +216,8 @@ def play(player, case_dir):
         ans, cost = answer_baseline(case_dir, text), 0.0
     elif player == "grayson":
         ans, cost = answer_grayson(text)
+    elif player.startswith("jev"):
+        ans, cost = answer_jev(text, *(["typesafe/" + player.split(":", 1)[1]] if ":" in player else []))
     elif player.startswith("openrouter:"):
         ans, cost = answer_llm(player.split(":", 1)[1], text)
     elif player.startswith("claude:"):
