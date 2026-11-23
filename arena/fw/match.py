@@ -111,15 +111,22 @@ class Match:
             history = self.week_cases
             base.undeploy(ROLE)
             base.set_outside(None)
-            ckpt = base.checkpoint()
-            if cache:
+            try:
+                ckpt = base.checkpoint()
+            except ValueError as error:  # a long warm-up can outgrow the engine's 512 MiB checkpoint limit
+                print(f"  no shareable checkpoint ({error}); forking in memory, history not cached")
+                ckpt = None
+            if cache and ckpt is not None:
                 import pickle
                 cache.mkdir(parents=True, exist_ok=True)
                 (cache / "history_cases.pkl").write_bytes(pickle.dumps(history))
                 (cache / "checkpoint.bin").write_bytes(ckpt)
         self.history_truth = self.out / "truth" / "warmup"
-        self.cand = runmere.Run.restore(self.world, ckpt, roots)
-        self.ref = runmere.Run.restore(self.world, ckpt, roots)
+        if ckpt is None:
+            self.cand, self.ref = base.fork(), base
+        else:
+            self.cand = runmere.Run.restore(self.world, ckpt, roots)
+            self.ref = runmere.Run.restore(self.world, ckpt, roots)
         rings = self.cand.entities("ring", ["number"]).to_pylist()
         self.rings = {r["number"]: r["entity"] for r in rings}
         # Match intensity: from the checkpoint on, every ring works at `intensity` times its usual volume in both
