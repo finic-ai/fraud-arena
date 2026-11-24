@@ -1,5 +1,5 @@
 {
-  "description": "Defender board roster (v1, rules-only). Every player runs through the same harness: mini-SWE-agent over OpenRouter.",
+  "description": "Fraud Strategy roster (v1, rules-only). Every player runs through the same harness: mini-SWE-agent over OpenRouter.",
   "players": [
     {"id": "opus", "display_name": "Claude Opus 5.5", "provider": "Anthropic", "model_id": "anthropic/claude-opus-5.5"},
     {"id": "sonnet", "display_name": "Claude Sonnet 5.5", "provider": "Anthropic", "model_id": "anthropic/claude-sonnet-5.5"},

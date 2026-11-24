@@ -1,6 +1,6 @@
-"""Summarize Defender board runs into the website's board data.
+"""Summarize Fraud Strategy runs into the website's board data (src/data/fraud-strategy.json).
 
-    python tools/summarize_defender.py --runs runs/defender --out defender.json
+    python tools/summarize_defender.py --runs runs/fraud-strategy --out fraud-strategy.json
 
 Reads RUNS/<seed>/manifest.json and RUNS/<seed>/<player>/result.json (from run_defender_roster.py). Per player and
 seed: the composite score (sum of the weekly defender scores: fraud losses prevented + 10% of the mule and laundering
@@ -29,6 +29,7 @@ def seed_row(result, player_dir):
         calls += stats.get("api_calls") or 0
     return {
         "composite": round(sum(x["score"] for x in d), 2),
+        "weekly": [x["score"] for x in d],
         "losses_prevented": round(sum(x["prevented"] for x in d), 2),
         "added_friction": round(sum(x["added_friction"] for x in d), 2),
         "mule_flow_cut": round(sum(x["no_defense"]["mule_flow"] - x["candidate"]["mule_flow"] for x in d), 2),
@@ -83,15 +84,49 @@ def main():
                                  "mule_cut": rows[s]["mule_flow_cut"], "friction": rows[s]["added_friction"],
                                  "exposed": rows[s]["losses_exposed"]} for s in seeds},
         }
+    # Paired comparison (LMArena-style upper-bound rank): A is clearly better than B when the 95% interval of their
+    # mean per seed-week score difference (same seed-week = identical fraud) is above 0. Intervals by cluster
+    # bootstrap over seeds; with few seeds (< 5) the seed-level bootstrap is degenerate, so seed-weeks are resampled
+    # within each seed instead (stratified), and the meta says which.
+    ids = list(players)
+    method = "seed_cluster" if len(seeds) >= 5 else "weeks_within_seed"
+    rng2 = random.Random(1)
+    def diffs(pa, pb):  # seed -> list of per-week differences
+        return {s: [x - y for x, y in zip(per[pa][s]["weekly"], per[pb][s]["weekly"])] for s in seeds}
+    def ci(dd):
+        means = []
+        for _ in range(RESAMPLES):
+            if method == "seed_cluster":
+                pick = [rng2.choice(seeds) for _ in seeds]
+                vals = [v for s in pick for v in dd[s]]
+            else:
+                vals = [rng2.choice(dd[s]) for s in seeds for _ in dd[s]]
+            means.append(sum(vals) / len(vals))
+        means.sort()
+        return means[int(0.025 * RESAMPLES)], means[int(0.975 * RESAMPLES) - 1]
+    better = {p: [] for p in ids}  # p -> players clearly better than p
+    for i, pa in enumerate(ids):
+        for pb in ids[i + 1:]:
+            lo, hi = ci(diffs(pa, pb))
+            if lo > 0:
+                better[pb].append(pa)
+            elif hi < 0:
+                better[pa].append(pb)
+    for p in ids:
+        players[p]["rank_ub"] = 1 + len(better[p])
+        players[p]["clearly_behind"] = sorted(better[p])
     out = {"updated": date.today().isoformat(), "seeds": seeds, "weeks": (settings or {}).get("weeks") or 1,
            "households": (settings or {}).get("households"),
-           "world_sha": ((settings or {}).get("hub") or {}).get("sha256"), "players": players}
+           "world_sha": ((settings or {}).get("hub") or {}).get("sha256"),
+           "rank_method": {"rank_ub": "1 + players clearly better (paired 95% CI on mean seed-week score difference > 0)",
+                           "bootstrap": method, "resamples": RESAMPLES},
+           "players": players}
     out = {k: v for k, v in out.items() if v is not None}
     Path(a.out).write_text(json.dumps(out, indent=1))
-    print(f"{'#':>2} {'player':10s} {'score':>10s} {'95% CI':>22s} {'prevented':>10s} {'mule cut':>10s} {'friction':>9s} {'cost':>8s}")
+    print(f"{'ub':>3} {'#':>2} {'player':10s} {'score':>10s} {'95% CI':>22s} {'prevented':>10s} {'mule cut':>10s} {'friction':>9s} {'cost':>8s}")
     for i, (pid, e) in enumerate(players.items(), 1):
         ci = e["score"]["ci95"]
-        print(f"{i:>2} {pid:10s} {e['score']['mean']:>10,.0f} {(f'[{ci[0]:,.0f}, {ci[1]:,.0f}]' if ci else '-'):>22s} "
+        print(f"{e['rank_ub']:>3} {i:>2} {pid:10s} {e['score']['mean']:>10,.0f} {(f'[{ci[0]:,.0f}, {ci[1]:,.0f}]' if ci else '-'):>22s} "
               f"{e['prevented']:>10,.0f} {e['mule_cut']:>10,.0f} {e['friction']:>9,.0f} {e['cost_usd']:>8.2f}")
     for pid in sorted(set(per) - set(complete)):
         print(f"   {pid:10s} not ranked: results on seeds {sorted(per[pid])} of {seeds}")

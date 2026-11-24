@@ -3,7 +3,7 @@
     python run_fw_match.py --defender claude:sonnet --attacker claude:opus --weeks 4 --out runs/NAME
     (a player is openrouter:<model id> for the benchmark harness: mini-SWE-agent over OpenRouter, any model;
     claude:<model> for a Claude Code session, for smoke tests; builtin for the bank's rules / the rings' scripts.
-    The defender task is rules-only: policies are rules on the decisions' features, no trained models.)
+    Fraud Strategy (the defender task) is rules-only: policies are rules on the decisions' features, no trained models.)
 
 Each Claude Code player runs on this machine with your Claude Code login, restricted to one tool: its own `arena`
 command (Bash(arena:*)), with no MCP servers, no user settings or hooks, and no session saved.
@@ -35,7 +35,7 @@ FRAUD_DEFENDER_ONLY = ("The fraud is the world's own: independent fraudsters and
                        "their own crews, who switch tactics when one stops working. No AI plays against you.")
 
 BRIEFS = {
-    "defender": """# You are the DEFENDER at Brindlemark Bank (Fraud Arena)
+    "defender": """# Fraud Strategy: you run Brindlemark Bank's fraud defenses (Fraud Arena)
 
 Brindlemark is a digital bank in a simulated economy (Runmere's Fraud World): thousands of customers, merchants and
 other financial institutions. {fraud_world}

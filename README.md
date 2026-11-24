@@ -18,7 +18,7 @@ ground truth, so every label is exact.
 |---|---|---|
 | **Alert triage** | Reads one alert's case packet (the alert, the customer's profile and activity as of the alert, who shares the customer's devices, IPs and payees) and answers three questions with probabilities: is it fraud, what kind, and is the customer a perpetrator, victim, mule or legitimate. One call per alert, no tools, so decision models and general LLMs compete on the same footing. | PR-AUC on the fraud question, weighted to a 10% alert fraud rate (a realistic queue); ROC-AUC, log loss, Brier, precision at 80% recall, fraud type and role accuracy are reported alongside. |
 | **Incident investigation** | Starts from an anomaly and a few seed customers, queries the bank's case file through a read-only command line in a sandbox, decides whether it is a real incident or a benign cluster, and finds every customer involved with their role. | mean@3 over cases (three independent trials each), with worst@3 / best@3, pass^3 on the verdict and a 95% bootstrap interval. |
-| **Defender** | Runs Brindlemark Bank's fraud defenses for eight weekly turns against the world's own fraud (independent fraudsters and organized rings that switch tactics). Each week the model studies the bank's data and deploys a rules-only policy across the bank's decisions (card authorizations, logins, account openings, payments, ACH, wires). | Composite score per seed: fraud losses prevented + 10% of the mule and laundering flow kept out of the bank − friction to good customers, against the same weeks replayed with the bank's built-in rules; mean over seeds with a 95% bootstrap interval. |
+| **Fraud Strategy** | Runs Brindlemark Bank's fraud defenses for eight weekly turns against the world's own fraud (independent fraudsters and organized rings that switch tactics). Each week the model studies the bank's data and deploys a rules-only policy across the bank's decisions (card authorizations, logins, account openings, payments, ACH, wires). | Composite score per seed: fraud losses prevented + 10% of the mule and laundering flow kept out of the bank − friction to good customers, against the same weeks replayed with the bank's built-in rules; mean over seeds with a 95% bootstrap interval. |
 
 **Models.** Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5; GPT-5.6 Sol, Terra and Luna; Inkling 2 Mini and Small; Mistral
 Large 4; DeepSeek V4.1 Flash; GLM 5.3. The alert triage board also includes two decision models, Finic's Grayson and
@@ -26,7 +26,7 @@ TypeSafe's Jev, and the incident board a non-LLM heuristic baseline.
 
 **Harness.** LLM players run through [mini-SWE-agent](https://github.com/SWE-agent/mini-swe-agent) over
 [OpenRouter](https://openrouter.ai) (`openrouter:<model id>`), so every model gets the same agent loop and the same
-tools. Each player works through its own command (`casefile` for investigations, `arena` for the defender) and writes its
+tools. Each player works through its own command (`casefile` for investigations, `arena` for Fraud Strategy) and writes its
 answer or policy under `drafts/`.
 
 **Seasons.** Results are reported per season on a fixed seed set. The 2027 season 1 official seeds are **201, 202 and
@@ -36,7 +36,7 @@ official set's answer keys are published after its season. A new season is new s
 ## Quickstart
 
 Python 3 with `duckdb` and `mini-swe-agent`; `OPENROUTER_API_KEY` set for model players. Building case sets and
-playing defender matches also need the Runmere engine (the `runmere` Python package) to simulate the world.
+playing Fraud Strategy matches also need the Runmere engine (the `runmere` Python package) to simulate the world.
 
 **Alert triage** (decision format, one call per alert):
 
@@ -55,12 +55,12 @@ python run_tasks.py score --runs runs/dev-s11-<model>
 python run_tasks.py export-harbor --cases cases/dev-s11 --out harbor/dev-s11    # each case as a Harbor task folder
 ```
 
-**Defender** (the roster in `roster.json`, one seed at a time; the seed's warm-up is built once and shared):
+**Fraud Strategy** (the roster in `roster.json`, one seed at a time; the seed's warm-up is built once and shared):
 
 ```bash
-python run_defender_roster.py --seed 201 --out runs/defender            # every roster model on seed 201
+python run_defender_roster.py --seed 201 --out runs/fraud-strategy           # every roster model on seed 201
 python run_defender_roster.py --seed 11 --players deepseek --weeks 2    # one model, a short development run
-python tools/summarize_defender.py --runs runs/defender --out defender.json
+python tools/summarize_defender.py --runs runs/fraud-strategy --out fraud-strategy.json
 ```
 
 The board's zero point is the bank's built-in rules: every week is replayed with them on the same seed. `--model
@@ -71,7 +71,7 @@ Claude Code session instead of mini-SWE-agent, for smoke tests only.
 
 ```
 run_tasks.py           investigation tasks: build case sets, run players, score, leaderboard, publish, Harbor export
-run_fw_match.py        one defender match (also the older 1v1 format); run_defender_roster.py plays the roster on a seed
+run_fw_match.py        one defender match (also the older 1v1 format); run_defender_roster.py plays the Fraud Strategy roster on a seed
 tools/run_decide.py    alert triage in the decision format; tools/leaderboard.py builds that board with CIs
 arena/tasks/           case building, the casefile tool, monitors, truth, scoring, the decision format
 arena/fw/              the 1v1 match: deployment of policies, the arena command, scoring
@@ -80,7 +80,7 @@ task-sets.json         the seed sets and case counts
 docs/tasks.md          the investigation tasks in detail: cases, truth, export, scoring, publishing
 ```
 
-The investigation tasks and the Defender board use the published Fraud World at its default settings (pinned in
+The investigation tasks and Fraud Strategy use the published Fraud World at its default settings (pinned in
 `fraud-world.json`).
 
 ## Links

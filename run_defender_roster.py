@@ -1,6 +1,6 @@
-"""Run the Defender board's roster on one seed: warm the seed up once, then play every defender from that warm-up.
+"""Run the Fraud Strategy roster on one seed: warm the seed up once, then play every defender from that warm-up.
 
-    python run_defender_roster.py --seed 201 --out runs/defender
+    python run_defender_roster.py --seed 201 --out runs/fraud-strategy
     python run_defender_roster.py --seed 7 --players deepseek,luna --roots 1200 --warmup 30 --weeks 2 --jobs 2
 
 Each defender is a model from roster.json playing through the benchmark harness (mini-SWE-agent over OpenRouter;
@@ -23,7 +23,7 @@ REPO = Path(__file__).resolve().parent
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, required=True)
-    ap.add_argument("--out", default="runs/defender", help="results root (OUT/<seed>/<player>/)")
+    ap.add_argument("--out", default="runs/fraud-strategy", help="results root (OUT/<seed>/<player>/)")
     ap.add_argument("--roster", default=str(REPO / "roster.json"))
     ap.add_argument("--players", help="comma-separated roster ids (default: the whole roster)")
     ap.add_argument("--roots", type=int, default=5000, help="households")
