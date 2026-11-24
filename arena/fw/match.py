@@ -313,12 +313,13 @@ class Match:
                 # default rules filled in), not in the defender's own list: map the index back to the defender's rule.
                 m = re.match(r"rules\.(\d+)\.", str(error))
                 rules = (policy or {}).get("rules") or []
-                composed = compose(policy or {}, self.builtin, self.gates, lists=self.lists, native=NATIVE_CASES)["rules"]
+                origin = []
+                compose(policy or {}, self.builtin, self.gates, lists=self.lists, native=NATIVE_CASES, origin=origin)
                 n = int(m.group(1)) if m else -1
-                own = [i for i, r in enumerate(rules) if 0 <= n < len(composed) and r is composed[n]]
-                if not own:
+                mine = origin[n] if 0 <= n < len(origin) else None
+                if mine is None:
                     return f"{type(error).__name__}: {error}"
-                rules.pop(own[0])
+                rules.pop(mine)
                 dropped.append(str(error).splitlines()[0][:200])
         return "too many refused rules: " + "; ".join(dropped[:3])
 

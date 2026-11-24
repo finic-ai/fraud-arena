@@ -227,8 +227,8 @@ def policy_help(work, role):
                  "Each rule: {\"decision\": <name>, \"when\": \"<expression over obs.<feature>>\", \"action\": <action>}.",
                  "Per decision, the first rule whose `when` holds decides; a decision with rules but none holding takes its default;",
                  "a decision with no rules keeps the bank's built-in policy. Expressions: and/or/not, comparisons, arithmetic,",
-                 "e.g. \"obs.amount > 2000 and obs.new_device\". Features can be none (missing): ordering or arithmetic on none",
-                 "is an error that rolls back your whole policy, so guard them: \"obs.x != none and obs.x > 24\".", ""]
+                 "e.g. \"obs.amount > 2000 and obs.new_device\". Features can be none (missing): a comparison that orders or",
+                 "does arithmetic on a missing value is false (\"obs.x > 24\" doesn't match when x is none).", ""]
         lines.append("Your decisions:")
         for d in decisions:
             feats = ", ".join(f"{f[0]}:{f[1]}" for f in d["features"])
@@ -368,8 +368,8 @@ def engine_check(policy):
     from arena.fw.match import NATIVE_CASES, ROLE
     builtin, gates = world_bits(Path(world), ROLE, "brindlemark_rules")
     run = runmere.World.load(world).start(1, 1, 1)
-    composed = compose(policy, builtin, gates, native=NATIVE_CASES)["rules"]
-    own = policy.get("rules") or []
+    origin = []
+    compose(policy, builtin, gates, native=NATIVE_CASES, origin=origin)
     try:
         run.deploy(ROLE, compose(policy, builtin, gates, native=NATIVE_CASES))
         return []
@@ -378,8 +378,8 @@ def engine_check(policy):
         for line in str(error).splitlines():
             m = re.match(r"rules\.(\d+)\.(\w+): (.*)", line)
             n = int(m.group(1)) if m else -1
-            mine = [i for i, r in enumerate(own) if 0 <= n < len(composed) and r is composed[n]] if m else []
-            problems.append(f"rules[{mine[0]}].{m.group(2)}: {m.group(3)}" if mine else line)
+            mine = origin[n] if 0 <= n < len(origin) else None
+            problems.append(f"rules[{mine}].{m.group(2)}: {m.group(3)}" if mine is not None else line)
         return problems
 
 
