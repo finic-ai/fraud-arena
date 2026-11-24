@@ -21,12 +21,6 @@ USAGE = """usage:
   arena rule add --decision D --when "EXPR" --action A [--at N]
                                (defender) add one rule (at position N, default the end) and save
   arena rule remove N          (defender) remove rule N and save
-  arena fit logistic|trees --decision D --features a,b,c [--where "SQL"] [--balanced] [--depth 3] [--trees 60]
-                               [--action A] [--fraud-value USD] [--save NAME]
-                               (defender) train a scoring model on the case table of decision D (label: fraud_known),
-                               report test metrics and the net dollars each cutoff would have made (fraud caught minus
-                               the friction of action A on good cases), and with --save add it to your policy as
-                               models.NAME (read in rules as score.NAME)
   arena list set NAME --key K (--query "SQL" | --values a,b,c)
                                (defender) a list the bank checks at decision time (a negative list / integration):
                                K is one of cust_id, acct_id, device_id, merchant_id, beneficiary_id; the values come
@@ -45,7 +39,9 @@ USAGE = """usage:
 LISTS = os.environ.get("ARENA_NO_LISTS") != "1"
 if not LISTS:
     USAGE = re.sub(r"  arena list set .*?\n(?=  arena tables)", "", USAGE, flags=re.S)
-NO_LISTS = "lists aren't available in this task: write rules on your decisions' features and models (arena policy help)"
+NO_LISTS = "lists aren't available in this task: write rules on your decisions' features (arena policy help)"
+# v1 of the defender task is rules-only: no trained models in policies.
+NO_MODELS = "models aren't available in this version; write rules on your decisions' features (arena policy help)"
 
 
 
@@ -90,7 +86,7 @@ def main(work, args):
             sys.exit(NO_LISTS)
         list_command(work, args[1:])
     elif cmd == "fit" and role == "defender":
-        fit_command(work, role, args[1:])
+        sys.exit(NO_MODELS)
     elif cmd == "tables" and role == "defender":
         from arena.fw.tools import connect
         db = connect(work)
@@ -170,34 +166,6 @@ def rule_command(work, role, args):
     sys.exit("usage: arena rule list | add --decision D --when \"EXPR\" --action A [--at N] | remove N")
 
 
-def fit_command(work, role, args):
-    if not args or args[0] not in ("logistic", "trees"):
-        sys.exit("usage: arena fit logistic|trees --decision D --features a,b,c [--where SQL] [--balanced] [--save NAME]")
-    o = _opts(args[1:], ("decision", "features", "where", "depth", "trees", "save", "action", "fraud-value"),
-              bools=("balanced",))
-    if "decision" not in o or "features" not in o:
-        sys.exit("--decision and --features are required")
-    from arena.fw.tools import fit
-    try:
-        report, model = fit(work, args[0], o["decision"], [f.strip() for f in o["features"].split(",") if f.strip()],
-                            where=o.get("where"), depth=int(o.get("depth", 3)), trees=int(o.get("trees", 60)),
-                            balanced=bool(o.get("balanced")), action=o.get("action"),
-                            fraud_value=o.get("fraud-value"))
-    except Exception as error:
-        sys.exit(f"fit failed: {error}")
-    print(report)
-    if o.get("save"):
-        name = o["save"]
-        if not name.replace("_", "").isalnum() or not name.islower():
-            sys.exit("--save NAME: lower case letters, digits and _")
-        policy = json.loads((work / "policy.json").read_text())
-        policy.setdefault("models", {})[name] = model
-        _save(work, role, policy, f"model {name!r}")
-        print(f"use it in rules as score.{name} (a probability 0-1), e.g. "
-              f"arena rule add --decision {o['decision']} --when \"score.{name} > 0.8\" --action ...")
-
-
-
 LIST_KEYS = ("cust_id", "acct_id", "device_id", "merchant_id", "beneficiary_id")
 MAX_LIST = 20000
 
@@ -252,15 +220,13 @@ def list_command(work, args):
 def policy_help(work, role):
     if role == "defender":
         decisions = json.loads((work / "decisions.json").read_text())
-        lines = ["Your policy is a Runmere deployment (format 1), JSON or YAML: \"format\": 1, \"rules\", and optional \"models\"",
-                 "For small changes use `arena rule add/remove`; to train a model on the",
-                 "bank's labeled cases use `arena fit` (it adds the model block for you with --save).",
-                 "Each rule: {\"decision\": <name>, \"when\": \"<expression over obs.<feature>, score.<model>>\", \"action\": <action>}.",
+        lines = ["Your policy is a Runmere deployment (format 1), JSON or YAML: \"format\": 1 and \"rules\".",
+                 "For small changes use `arena rule add/remove`. Policies are rules only (no trained models).",
+                 "Each rule: {\"decision\": <name>, \"when\": \"<expression over obs.<feature>>\", \"action\": <action>}.",
                  "Per decision, the first rule whose `when` holds decides; a decision with rules but none holding takes its default;",
                  "a decision with no rules keeps the bank's built-in policy. Expressions: and/or/not, comparisons, arithmetic,",
                  "e.g. \"obs.amount > 2000 and obs.new_device\". Features can be none (missing): ordering or arithmetic on none",
-                 "is an error that rolls back your whole policy, so guard them: \"obs.x != none and obs.x > 24\". Models (optional): {\"name\": {\"kind\": \"logistic\", \"features\": [...],",
-                 "\"weights\": [...], \"intercept\": 0}} read as score.<name> (also kinds linear, trees).", ""]
+                 "is an error that rolls back your whole policy, so guard them: \"obs.x != none and obs.x > 24\".", ""]
         lines.append("Your decisions:")
         for d in decisions:
             feats = ", ".join(f"{f[0]}:{f[1]}" for f in d["features"])
@@ -336,13 +302,14 @@ def check(work, role, policy):
         decisions = {d["name"]: d for d in json.loads((work / "decisions.json").read_text())}
         if not isinstance(policy, dict) or policy.get("format") not in (1,):
             return ['needs "format": 1']
+        if policy.get("models"):
+            problems.append(f"models: {NO_MODELS}")
         unknown = set(policy) - {"format", "name", "rules", "models"}
         if unknown:
             problems.append(f"unknown top-level keys: {sorted(unknown)}")
         rules = policy.get("rules")
         if not isinstance(rules, list):
             return ['needs "rules": [...]']
-        models = policy.get("models") or {}
         for i, r in enumerate(rules):
             d = decisions.get(r.get("decision")) if isinstance(r, dict) else None
             if d is None:
@@ -361,8 +328,7 @@ def check(work, role, policy):
                 elif not q.startswith("list_") or q[5:] not in lists:
                     problems.append(f"rules[{i}]: outside.{q} isn't one of your lists (arena list show)")
             for m in re.findall(r"score\.([a-zA-Z_0-9]+)", str(r.get("when", ""))):
-                if m not in models:
-                    problems.append(f"rules[{i}]: no model named {m!r} in \"models\"")
+                problems.append(f"rules[{i}]: score.{m}: {NO_MODELS}")
         return problems
     menu = json.loads((work / "menu.json").read_text())
     if not isinstance(policy, dict):

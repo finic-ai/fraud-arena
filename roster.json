@@ -1,0 +1,16 @@
+{
+  "description": "Defender board roster (v1, rules-only). Every player runs through the same harness: mini-SWE-agent over OpenRouter.",
+  "players": [
+    {"id": "opus", "display_name": "Claude Opus 5.5", "provider": "Anthropic", "model_id": "anthropic/claude-opus-5.5"},
+    {"id": "sonnet", "display_name": "Claude Sonnet 5.5", "provider": "Anthropic", "model_id": "anthropic/claude-sonnet-5.5"},
+    {"id": "haiku", "display_name": "Claude Haiku 5.5", "provider": "Anthropic", "model_id": "anthropic/claude-haiku-5.5"},
+    {"id": "sol", "display_name": "GPT-5.6 Sol", "provider": "OpenAI", "model_id": "openai/gpt-5.6-sol"},
+    {"id": "terra", "display_name": "GPT-5.6 Terra", "provider": "OpenAI", "model_id": "openai/gpt-5.6-terra"},
+    {"id": "luna", "display_name": "GPT-5.6 Luna", "provider": "OpenAI", "model_id": "openai/gpt-5.6-luna"},
+    {"id": "ink-mini", "display_name": "Inkling 2 Mini", "provider": "Thinking Machines", "model_id": "thinkingmachines/inkling-2-mini"},
+    {"id": "ink-small", "display_name": "Inkling 2 Small", "provider": "Thinking Machines", "model_id": "thinkingmachines/inkling-2-small"},
+    {"id": "mistral", "display_name": "Mistral Large 4", "provider": "Mistral", "model_id": "mistralai/mistral-large-4-0"},
+    {"id": "deepseek", "display_name": "DeepSeek V4.1 Flash", "provider": "DeepSeek", "model_id": "deepseek/deepseek-v4.1-flash"},
+    {"id": "glm", "display_name": "GLM 5.3", "provider": "Z.ai", "model_id": "z-ai/glm-5.3"}
+  ]
+}

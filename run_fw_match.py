@@ -2,8 +2,8 @@
 
     python run_fw_match.py --defender claude:sonnet --attacker claude:opus --weeks 4 --out runs/NAME
     (a player is openrouter:<model id> for the benchmark harness: mini-SWE-agent over OpenRouter, any model;
-    claude:<model> for a Claude Code session, for smoke tests; builtin for the bank's rules / the rings' scripts; or,
-    for the defender, baseline:models for the scripted model-only reference)
+    claude:<model> for a Claude Code session, for smoke tests; builtin for the bank's rules / the rings' scripts.
+    The defender task is rules-only: policies are rules on the decisions' features, no trained models.)
 
 Each Claude Code player runs on this machine with your Claude Code login, restricted to one tool: its own `arena`
 command (Bash(arena:*)), with no MCP servers, no user settings or hooks, and no session saved.
@@ -29,22 +29,27 @@ LISTS_TOOL = "" if NATIVE_CASES else (
     " `arena list set` for lists the bank checks at decision time (e.g. devices, accounts or customers tied to"
     " confirmed fraud), which rules read as outside.list_NAME;")
 
+FRAUD_1V1 = ("One fraud ring operates in this world; another AI runs it and adapts each week. All\n"
+             "fraud in the world is the ring's.")
+FRAUD_DEFENDER_ONLY = ("The fraud is the world's own: independent fraudsters and organized rings with\n"
+                       "their own crews, who switch tactics when one stops working. No AI plays against you.")
+
 BRIEFS = {
     "defender": """# You are the DEFENDER at Brindlemark Bank (Fraud Arena)
 
 Brindlemark is a digital bank in a simulated economy (Runmere's Fraud World): thousands of customers, merchants and
-other financial institutions. One fraud ring operates in this world; another AI runs it and adapts each week. All
-fraud in the world is the ring's.
+other financial institutions. {fraud_world}
 
 You control the bank's automated decisions: card authorizations, logins, account openings, payments and more (`arena
-policy help`). Each week you may deploy a new policy: rules (and optional scoring models) that the bank applies to
+policy help`). Each week you may deploy a new policy: rules that the bank applies to
 every decision of that kind. Decisions you write no rules for keep the bank's built-in rules.
 
-Scoring, per week: the same week is replayed with the bank's built-in rules against the very same attack. Your score
-is the fraud losses your policy prevented at Brindlemark compared with that replay, minus the extra friction you cause
+Scoring, per week: the same week is replayed with the bank's built-in rules against the very same fraud. Your score
+is the fraud losses your policy prevented at Brindlemark compared with that replay, plus 10% of the fraud money it kept
+from passing through Brindlemark accounts on its way elsewhere (mule and laundering flow), minus the extra friction you cause
 good customers (declines cost $3 + 10% of the amount, step-ups $0.50, holds $2, reviews $15, alerts $8, blocks $25,
 account closures $200). The bank's analysts can work 10 reviews a day; reviews beyond that cost $75 each (overtime).
-A harder attack doesn't lower your score by itself; only what your policy does counts.
+A worse week of fraud doesn't lower your score by itself; only what your policy does counts.
 
 Your data: the bank's own tables (`arena tables`, `arena query`): customers, accounts, card authorizations, logins,
 transfers, applications, disputes, alerts and more, as the bank sees them; and cases_<decision> tables with every
@@ -53,9 +58,8 @@ fraud the bank has discovered or its victim has reported so far: most victims re
 recent fraud is often still unlabeled). The bank has {history} of history before the match. You
 never see the ring's plans.
 
-Your tools: `arena rule add/remove/list` for quick rule changes; `arena fit logistic|trees` to train a scoring model on
-the labeled cases (it reports test metrics and the net dollars each cutoff would have made, and with --save adds the
-model to your policy);{lists_tool} and `arena policy set` for whole policies (JSON or YAML).
+Your tools: `arena rule add/remove/list` for quick rule changes;{lists_tool} `arena query` to test a rule's hits on the
+bank's history before deploying it; and `arena policy set` for whole policies (JSON or YAML). Policies are rules only.
 
 What the actions do in this world (they differ a lot in how much fraud they stop):
 - block, reject, decline and return_debit stop the event: the payment, login, authorization or debit doesn't go
@@ -70,7 +74,6 @@ What the actions do in this world (they differ a lot in how much fraud they stop
   the contact details on file: about half of takeovers are stopped (few when the attacker changed the contact
   details) and about a quarter of scam payments.
 - review sends an application to the bank's analysts (10 a day, then $75 each).
-`arena fit` prices a cutoff as if the action stops every fraud it flags; that is only true of the stopping actions.
 """,
     "attacker": """# You are the ATTACKER: a fraud ring (Fraud Arena)
 
@@ -159,8 +162,12 @@ def main():
     ap.add_argument("--defender-only", action="store_true",
                     help="no attacking agent: advance only the candidate and no-defense runs (requires --attacker none)")
     ap.add_argument("--history-cache", help="a folder holding this seed's warm-up (built once, shared by defenders)")
+    ap.add_argument("--warm-only", action="store_true",
+                    help="build this seed's warm-up into --history-cache and exit (no weeks are played)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    if args.warm_only and not args.history_cache:
+        ap.error("--warm-only needs --history-cache")
     if args.defender_only and is_ai(args.attacker):
         ap.error("--defender-only needs a non-agent attacker (e.g. --attacker none)")
 
@@ -168,6 +175,9 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     m = Match(out, world=args.world and Path(args.world), seed=args.seed, roots=args.roots, warmup_days=args.warmup,
               intensity=args.intensity, history_cache=args.history_cache, defender_only=args.defender_only)
+    if args.warm_only:
+        print(f"warm-up ready: {m.cache_dir}", flush=True)
+        return
     players = {"defender": args.defender, "attacker": args.attacker}
     works = {}
     for role, who in players.items():
@@ -175,7 +185,8 @@ def main():
         work.mkdir()
         (work / "role").write_text(role)
         if role == "defender":
-            BRIEFS["defender"] = BRIEFS["defender"].replace("{history}", f"{args.warmup} days")
+            BRIEFS["defender"] = BRIEFS["defender"].replace("{history}", f"{args.warmup} days").replace(
+                "{fraud_world}", FRAUD_DEFENDER_ONLY if args.defender_only else FRAUD_1V1)
         (work / "brief.md").write_text(BRIEFS[role])
         (work / "notes.md").write_text("")
         (work / "data").mkdir()
@@ -237,16 +248,6 @@ def main():
             turns = dict(zip(players, pool.map(turn, players)))
 
         deploy_error = None
-        if players["defender"] == "baseline:models":  # the scripted model-only reference defender
-            from arena.fw.baseline import model_policy
-            print(f"week {wk + 1} model baseline:", flush=True)
-            pol = model_policy(works["defender"])
-            covered = {r["decision"] for r in pol["rules"]}
-            pol["rules"] += [r for r in m.builtin if r["decision"] in covered]  # built-in rules stay behind the model
-            if not pol["models"]:
-                pol.pop("models")
-            (works["defender"] / "policy.json").write_text(json.dumps(pol, indent=1))
-            deploy_error = m.deploy(pol)
         if is_ai(players["defender"]):
             lf = works["defender"] / "lists.json"
             deploy_error = m.deploy(json.loads((works["defender"] / "policy.json").read_text()),

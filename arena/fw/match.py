@@ -7,6 +7,7 @@ runs advance a week and each side is scored against the reference on that week.
 """
 
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,6 +88,17 @@ def _run_all(runs, day):
     return errors
 
 
+# Engines with Runmere's file checkpoints (no size cap, streamed to disk) can cache any warm-up.
+FILE_CHECKPOINTS = hasattr(runmere.Run, "checkpoint_to") and hasattr(runmere.Run, "restore_from")
+
+
+def cache_dir(root, world_path, seed, roots, warmup_days):
+    """The cache folder of one warm-up: keyed by the world file's content, seed, households and warm-up days."""
+    import hashlib
+    world = hashlib.sha256(Path(world_path).read_bytes()).hexdigest()[:16]
+    return Path(root) / f"w{world}-s{seed}-r{roots}-d{warmup_days}"
+
+
 class Match:
     def __init__(self, out, *, world=None, seed=7, roots=1500, warmup_days=60, week_days=7, intensity=1.0,
                  history_cache=None, defender_only=False):
@@ -104,39 +116,13 @@ class Match:
         self.builtin, self.gates = world_bits(self.world_path, ROLE, "brindlemark_rules")
         self.week_cases = []
         # The warm-up depends only on (world, seed, households, days), so it is built once and shared: every
-        # defender playing this seed starts from the identical history.
-        cache = Path(history_cache) if history_cache else None
-        if cache and (cache / "checkpoint.bin").exists():
-            import pickle
-            ckpt = (cache / "checkpoint.bin").read_bytes()
-            history = pickle.loads((cache / "history_cases.pkl").read_bytes())
-            base = runmere.Run.restore(self.world, ckpt, roots)
-        else:
-            base = self.world.start(seed, 1, roots)
-            base.deploy(ROLE, compose({}, self.builtin, self.gates, native=NATIVE_CASES))
-            if not NATIVE_CASES:
-                base.set_outside(self._outside)
-            base.run_until_day(warmup_days)
-            self._take(base)
-            history = self.week_cases
-            base.undeploy(ROLE)
-            base.set_outside(None)
-            try:
-                ckpt = base.checkpoint()
-            except ValueError as error:  # a long warm-up can outgrow the engine's 512 MiB checkpoint limit
-                print(f"  no shareable checkpoint ({error}); forking in memory, history not cached")
-                ckpt = None
-            if cache and ckpt is not None:
-                import pickle
-                cache.mkdir(parents=True, exist_ok=True)
-                (cache / "history_cases.pkl").write_bytes(pickle.dumps(history))
-                (cache / "checkpoint.bin").write_bytes(ckpt)
+        # defender playing this seed starts from the identical history. The cache folder is keyed by those settings.
+        self.cache_dir = cache_dir(history_cache, self.world_path, seed, roots, warmup_days) if history_cache else None
+        restore = self._warm_up(self.cache_dir)
+        history = self.week_cases
         self.history_truth = self.out / "truth" / "warmup"
-        if ckpt is None:
-            self.cand, self.ref = base.fork(), base
-        else:
-            self.cand = runmere.Run.restore(self.world, ckpt, roots)
-            self.ref = runmere.Run.restore(self.world, ckpt, roots)
+        self.cand, self.ref = restore(), restore()
+        self._warm_restore = restore  # one more copy, untouched by the match's settings, for exporting the history
         rings = self.cand.entities("ring", ["number"]).to_pylist()
         self.rings = {r["number"]: r["entity"] for r in rings}
         # Match intensity: from the checkpoint on, every ring works at `intensity` times its usual volume in both
@@ -177,10 +163,61 @@ class Match:
         self.touched = set()  # every ring attribute the attacker has set so far
         # The case log the logging rule fills (training data), starting with the warm-up's history.
         self.week_cases, self.all_cases = [], history
-        self.last_truth, _ = self._export(base, self.history_truth)
+        warm = self._warm_restore()
+        self.last_truth, _ = self._export(warm, self.history_truth)
+        del warm, self._warm_restore
         self.cand.deploy(ROLE, compose({}, self.builtin, self.gates, native=NATIVE_CASES))
         if not NATIVE_CASES:
             self.cand.set_outside(self._outside)
+
+    def _warm_up(self, cache):
+        """Warm the world up (or restore a cached warm-up) and return a function giving a fresh run at the end of it."""
+        import pickle
+        roots = self.roots
+        ckpt_file = cache / "checkpoint.ckpt" if cache else None
+        if cache and (cache / "history_cases.pkl").exists():
+            self.week_cases = pickle.loads((cache / "history_cases.pkl").read_bytes())
+            print(f"  warm-up restored from cache {cache.name}", flush=True)
+            if ckpt_file.exists():
+                return lambda: runmere.Run.restore_from(self.world, str(ckpt_file), roots)
+            data = (cache / "checkpoint.bin").read_bytes()
+            return lambda: runmere.Run.restore(self.world, data, roots)
+        base = self.world.start(self.seed, 1, roots)
+        base.deploy(ROLE, compose({}, self.builtin, self.gates, native=NATIVE_CASES))
+        if not NATIVE_CASES:
+            base.set_outside(self._outside)
+        base.run_until_day(self.warmup_days)
+        self._take(base)
+        base.undeploy(ROLE)
+        base.set_outside(None)
+        if cache and FILE_CHECKPOINTS:
+            tmp = cache.parent / f".{cache.name}.{os.getpid()}.tmp"
+            tmp.mkdir(parents=True)
+            base.checkpoint_to(str(tmp / "checkpoint.ckpt"))
+            (tmp / "history_cases.pkl").write_bytes(pickle.dumps(self.week_cases))
+            try:
+                tmp.rename(cache)  # atomic: other processes see the whole cache or none of it
+                print(f"  warm-up built and cached as {cache.name}", flush=True)
+            except OSError:  # another process cached the same warm-up first: theirs is identical
+                shutil.rmtree(tmp, ignore_errors=True)
+            return lambda: runmere.Run.restore_from(self.world, str(ckpt_file), roots)
+        try:
+            data = base.checkpoint()
+        except ValueError as error:  # an engine without file checkpoints caps them at 512 MiB
+            print(f"  no shareable checkpoint ({error}); forking in memory, history not cached", flush=True)
+            forks = iter([base.fork(), base.fork(), base])
+            return lambda: next(forks)
+        if cache:
+            tmp = cache.parent / f".{cache.name}.{os.getpid()}.tmp"
+            tmp.mkdir(parents=True)
+            (tmp / "checkpoint.bin").write_bytes(data)
+            (tmp / "history_cases.pkl").write_bytes(pickle.dumps(self.week_cases))
+            try:
+                tmp.rename(cache)
+                print(f"  warm-up built and cached as {cache.name}", flush=True)
+            except OSError:
+                shutil.rmtree(tmp, ignore_errors=True)
+        return lambda: runmere.Run.restore(self.world, data, roots)
 
     def _outside(self, case, view):
         """Answers the candidate run's outside requests: logs the case (the defender's training data)."""
