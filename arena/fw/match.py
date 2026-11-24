@@ -309,12 +309,17 @@ class Match:
                 self.deployed, self.deployed_lists = policy, lists
                 return f"deployed without {len(dropped)} rule(s) the engine refused: " + "; ".join(dropped) if dropped else None
             except Exception as error:
+                # The engine numbers rules in the composed deployment (grouped by decision point, with built-in and
+                # default rules filled in), not in the defender's own list: map the index back to the defender's rule.
                 m = re.match(r"rules\.(\d+)\.", str(error))
                 rules = (policy or {}).get("rules") or []
-                if not m or int(m.group(1)) >= len(rules):
+                composed = compose(policy or {}, self.builtin, self.gates, lists=self.lists, native=NATIVE_CASES)["rules"]
+                n = int(m.group(1)) if m else -1
+                own = [i for i, r in enumerate(rules) if 0 <= n < len(composed) and r is composed[n]]
+                if not own:
                     return f"{type(error).__name__}: {error}"
-                rules.pop(int(m.group(1)))
-                dropped.append(str(error)[:200])
+                rules.pop(own[0])
+                dropped.append(str(error).splitlines()[0][:200])
         return "too many refused rules: " + "; ".join(dropped[:3])
 
     def set_plan(self, plan):
