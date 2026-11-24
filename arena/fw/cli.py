@@ -78,7 +78,7 @@ def main(work, args):
         if problems:
             sys.exit("policy NOT saved:\n" + "\n".join(f"  - {p}" for p in problems[:30]))
         (work / "policy.json").write_text(json.dumps(policy, indent=1))
-        print("policy saved; it takes effect at the start of next week")
+        print("policy saved (the engine accepted every rule); it takes effect at the start of next week")
     elif cmd == "rule" and role == "defender":
         rule_command(work, role, args[1:])
     elif cmd == "list" and role == "defender":
@@ -101,7 +101,9 @@ def main(work, args):
             cur = db.execute(args[1])
         except Exception as error:
             sys.exit(f"SQL error: {error}")
-        print("\t".join(d[0] for d in cur.description or []))
+        if cur is None or cur.description is None:
+            return print("(no rows)")
+        print("\t".join(d[0] for d in cur.description))
         rows = cur.fetchmany(201)
         for row in rows[:200]:
             print("\t".join("" if v is None else str(v) for v in row))
@@ -329,6 +331,8 @@ def check(work, role, policy):
                     problems.append(f"rules[{i}]: outside.{q} isn't one of your lists (arena list show)")
             for m in re.findall(r"score\.([a-zA-Z_0-9]+)", str(r.get("when", ""))):
                 problems.append(f"rules[{i}]: score.{m}: {NO_MODELS}")
+        if not problems:
+            problems = engine_check(policy)
         return problems
     menu = json.loads((work / "menu.json").read_text())
     if not isinstance(policy, dict):
@@ -351,5 +355,34 @@ def check(work, role, policy):
     return problems + budget_problems(policy, menu)
 
 
+
+def engine_check(policy):
+    """Compile the policy in the engine, as deploying it would, so a rule the engine refuses (a name that isn't in
+    scope, an expression that doesn't parse, a value outside a code list) is reported when the policy is saved, not
+    at the start of next week. Errors from missing (none) values at decision time can't be caught here."""
+    world = os.environ.get("ARENA_WORLD")
+    if not world:
+        return []
+    import runmere
+    from arena.fw.deployment import compose, world_bits
+    from arena.fw.match import NATIVE_CASES, ROLE
+    builtin, gates = world_bits(Path(world), ROLE, "brindlemark_rules")
+    run = runmere.World.load(world).start(1, 1, 1)
+    composed = compose(policy, builtin, gates, native=NATIVE_CASES)["rules"]
+    own = policy.get("rules") or []
+    try:
+        run.deploy(ROLE, compose(policy, builtin, gates, native=NATIVE_CASES))
+        return []
+    except Exception as error:
+        problems = []
+        for line in str(error).splitlines():
+            m = re.match(r"rules\.(\d+)\.(\w+): (.*)", line)
+            n = int(m.group(1)) if m else -1
+            mine = [i for i, r in enumerate(own) if 0 <= n < len(composed) and r is composed[n]] if m else []
+            problems.append(f"rules[{mine[0]}].{m.group(2)}: {m.group(3)}" if mine else line)
+        return problems
+
+
 if __name__ == "__main__":
     main(sys.argv[1], sys.argv[2:])
+

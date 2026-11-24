@@ -119,11 +119,17 @@ def is_ai(who):
 
 
 
+WORLD_FOR_CHECK = None  # the match's world file, set in main()
+
+
 def write_wrapper(bin_dir, work):
     bin_dir.mkdir(parents=True, exist_ok=True)
     w = bin_dir / "arena"
     no_lists = "ARENA_NO_LISTS=1 " if NATIVE_CASES else ""
-    w.write_text(f'#!/bin/sh\n{no_lists}PYTHONPATH="{REPO}" exec "{sys.executable}" -m arena.fw.cli "{work}" "$@"\n')
+    # ARENA_WORLD lets the tool compile a policy in the engine when it is saved (errors come back in the same turn).
+    world = f'ARENA_WORLD="{WORLD_FOR_CHECK}" ' if WORLD_FOR_CHECK else ""
+    cache = f'FA_WORLD_CACHE="{os.environ["FA_WORLD_CACHE"]}" ' if os.environ.get("FA_WORLD_CACHE") else ""
+    w.write_text(f'#!/bin/sh\n{no_lists}{world}{cache}PYTHONPATH="{REPO}" exec "{sys.executable}" -m arena.fw.cli "{work}" "$@"\n')
     w.chmod(0o700)
 
 
@@ -173,11 +179,13 @@ def main():
 
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
+    global WORLD_FOR_CHECK
     m = Match(out, world=args.world and Path(args.world), seed=args.seed, roots=args.roots, warmup_days=args.warmup,
               intensity=args.intensity, history_cache=args.history_cache, defender_only=args.defender_only)
     if args.warm_only:
         print(f"warm-up ready: {m.cache_dir}", flush=True)
         return
+    WORLD_FOR_CHECK = str(m.world_path)
     players = {"defender": args.defender, "attacker": args.attacker}
     works = {}
     for role, who in players.items():
