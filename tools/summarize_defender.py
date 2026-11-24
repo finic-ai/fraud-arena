@@ -66,21 +66,32 @@ def main():
     rng = random.Random(0)
     draws = [[rng.choice(seeds) for _ in seeds] for _ in range(RESAMPLES)]
     players = {}
-    for pid in sorted(complete, key=lambda p: -mean([per[p][s]["composite"] for s in seeds])):
+    # Headline: net savings as a share of the seed's exposed losses (the losses under the bank's built-in rules), so
+    # every seed counts equally whatever its fraud volume: (prevented + mule weight x mule cut - friction) / exposed.
+    for rows in per.values():
+        for r in rows.values():
+            r["pct"] = 100 * r["composite"] / r["losses_exposed"] if r["losses_exposed"] else 0.0
+
+    def boot_ci(vals):
+        if len(seeds) < 2:
+            return None
+        boots = sorted(mean([vals[s] for s in d]) for d in draws)
+        return [round(boots[int(0.025 * RESAMPLES)], 2), round(boots[int(0.975 * RESAMPLES) - 1], 2)]
+
+    for pid in sorted(complete, key=lambda p: -mean([per[p][s]["pct"] for s in seeds])):
         rows, m = per[pid], meta_players[pid]
-        ci = None
-        if len(seeds) > 1:
-            boots = sorted(mean([rows[s]["composite"] for s in d]) for d in draws)
-            ci = [round(boots[int(0.025 * RESAMPLES)], 2), round(boots[int(0.975 * RESAMPLES) - 1], 2)]
+        ci = boot_ci({s: rows[s]["composite"] for s in seeds})
         players[pid] = {
             "meta": {"display_name": m["display_name"], "provider": m["provider"], "kind": "LLM",
                      "model_id": m["model_id"]},
+            "net_pct": {"mean": round(mean([rows[s]["pct"] for s in seeds]), 2),
+                        "ci95": boot_ci({s: rows[s]["pct"] for s in seeds})},
             "score": {"mean": round(mean([rows[s]["composite"] for s in seeds]), 2), "ci95": ci},
             "prevented": round(mean([rows[s]["losses_prevented"] for s in seeds]), 2),
             "mule_cut": round(mean([rows[s]["mule_flow_cut"] for s in seeds]), 2),
             "friction": round(mean([rows[s]["added_friction"] for s in seeds]), 2),
             "cost_usd": round(sum(rows[s]["cost_usd"] for s in seeds), 4),  # total over all seeds
-            "by_seed": {str(s): {"score": rows[s]["composite"], "prevented": rows[s]["losses_prevented"],
+            "by_seed": {str(s): {"net_pct": round(rows[s]["pct"], 2), "score": rows[s]["composite"], "prevented": rows[s]["losses_prevented"],
                                  "mule_cut": rows[s]["mule_flow_cut"], "friction": rows[s]["added_friction"],
                                  "exposed": rows[s]["losses_exposed"]} for s in seeds},
         }
@@ -92,7 +103,9 @@ def main():
     method = "seed_cluster" if len(seeds) >= 5 else "weeks_within_seed"
     rng2 = random.Random(1)
     def diffs(pa, pb):  # seed -> list of per-week differences
-        return {s: [x - y for x, y in zip(per[pa][s]["weekly"], per[pb][s]["weekly"])] for s in seeds}
+        # weekly score difference as a share of the seed's exposed losses (the headline's scale)
+        return {s: [100 * (x - y) / (per[pa][s]["losses_exposed"] or 1)
+                    for x, y in zip(per[pa][s]["weekly"], per[pb][s]["weekly"])] for s in seeds}
     def ci(dd):
         means = []
         for _ in range(RESAMPLES):
@@ -115,19 +128,35 @@ def main():
     for p in ids:
         players[p]["rank_ub"] = 1 + len(better[p])
         players[p]["clearly_behind"] = sorted(better[p])
+    # Robustness: each model's rank on each seed (by net %), the mean rank over seeds (as in comparisons of methods over
+    # several datasets), and Kendall's W, the agreement of the per-seed rankings (1 = every seed ranks models alike).
+    for s in seeds:
+        for i, p in enumerate(sorted(ids, key=lambda q: -per[q][s]["pct"]), 1):
+            players[p]["by_seed"][str(s)]["rank"] = i
+    for p in ids:
+        players[p]["mean_rank"] = round(mean([players[p]["by_seed"][str(s)]["rank"] for s in seeds]), 2)
+    n, m = len(ids), len(seeds)
+    kendall_w = None
+    if n > 1 and m > 1:
+        sums = [sum(players[p]["by_seed"][str(s)]["rank"] for s in seeds) for p in ids]
+        avg = sum(sums) / n
+        kendall_w = round(12 * sum((x - avg) ** 2 for x in sums) / (m * m * (n ** 3 - n)), 3)
     out = {"updated": date.today().isoformat(), "seeds": seeds, "weeks": (settings or {}).get("weeks") or 1,
            "households": (settings or {}).get("households"),
            "world_sha": ((settings or {}).get("hub") or {}).get("sha256"),
-           "rank_method": {"rank_ub": "1 + players clearly better (paired 95% CI on mean seed-week score difference > 0)",
+           "rank_method": {"order": "net_pct: (prevented + mule weight x mule cut - friction) / exposed losses, mean over seeds",
+                           "rank_ub": "1 + players clearly better (paired 95% CI on the mean seed-week difference in net_pct > 0)",
                            "bootstrap": method, "resamples": RESAMPLES},
-           "players": players}
+           "kendall_w": kendall_w, "players": players}
     out = {k: v for k, v in out.items() if v is not None}
     Path(a.out).write_text(json.dumps(out, indent=1))
-    print(f"{'ub':>3} {'#':>2} {'player':10s} {'score':>10s} {'95% CI':>22s} {'prevented':>10s} {'mule cut':>10s} {'friction':>9s} {'cost':>8s}")
+    print(f"{'ub':>3} {'#':>2} {'player':10s} {'net %':>6s} {'score':>10s} {'95% CI':>22s} {'prevented':>10s} {'mule cut':>10s} {'friction':>9s} {'cost':>8s}")
     for i, (pid, e) in enumerate(players.items(), 1):
         ci = e["score"]["ci95"]
-        print(f"{e['rank_ub']:>3} {i:>2} {pid:10s} {e['score']['mean']:>10,.0f} {(f'[{ci[0]:,.0f}, {ci[1]:,.0f}]' if ci else '-'):>22s} "
+        print(f"{e['rank_ub']:>3} {i:>2} {pid:10s} {e['net_pct']['mean']:>6.1f} {e['score']['mean']:>10,.0f} {(f'[{ci[0]:,.0f}, {ci[1]:,.0f}]' if ci else '-'):>22s} "
               f"{e['prevented']:>10,.0f} {e['mule_cut']:>10,.0f} {e['friction']:>9,.0f} {e['cost_usd']:>8.2f}")
+    print(f"mean rank over seeds: " + ", ".join(f"{p} {e['mean_rank']}" for p, e in players.items()))
+    print(f"Kendall's W (agreement of per-seed rankings): {kendall_w}")
     for pid in sorted(set(per) - set(complete)):
         print(f"   {pid:10s} not ranked: results on seeds {sorted(per[pid])} of {seeds}")
 
